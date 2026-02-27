@@ -8,7 +8,8 @@
     "scripting",
     "tabs",
     "sidePanel",
-    "storage"
+    "storage",
+    "debugger"
   ],
   "host_permissions": [
     "<all_urls>"
@@ -22,6 +23,19 @@
       "matches": ["<all_urls>"],
       "js": ["content.js"],
       "run_at": "document_idle"
+    },
+    {
+      "matches": ["<all_urls>"],
+      "js": ["cf-injected.js"],
+      "world": "MAIN",
+      "run_at": "document_start",
+      "all_frames": true
+    },
+    {
+      "matches": ["<all_urls>"],
+      "js": ["cf-content.js"],
+      "run_at": "document_start",
+      "all_frames": true
     }
   ],
   "side_panel": {

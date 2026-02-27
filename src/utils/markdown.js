@@ -1,23 +1,29 @@
-/** 简单的 Markdown -> HTML 转换 */
+import { marked } from 'marked'
+
+// 配置 marked
+marked.setOptions({
+  gfm: true,          // GitHub 风格 Markdown
+  breaks: true,       // 换行符转 <br>
+})
+
+/** Markdown -> HTML（安全转换） */
 export function formatMarkdown(text) {
   if (!text) return ''
-  let html = escapeHtml(text)
-  // 代码块
-  html = html.replace(/```(\w*)\n([\s\S]*?)```/g, '<pre><code class="lang-$1">$2</code></pre>')
-  // 行内代码
-  html = html.replace(/`([^`]+)`/g, '<code>$1</code>')
-  // 粗体
-  html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-  // 斜体
-  html = html.replace(/\*(.+?)\*/g, '<em>$1</em>')
-  // 链接
-  html = html.replace(
-    /\[([^\]]+)\]\(([^)]+)\)/g,
-    '<a href="$2" target="_blank" rel="noopener">$1</a>'
-  )
-  // 换行
-  html = html.replace(/\n/g, '<br>')
-  return html
+  try {
+    return marked.parse(text)
+  } catch {
+    return escapeHtml(text)
+  }
+}
+
+/** 内联 Markdown -> HTML（不包裹 <p>，用于流式片段） */
+export function formatMarkdownInline(text) {
+  if (!text) return ''
+  try {
+    return marked.parseInline(text)
+  } catch {
+    return escapeHtml(text)
+  }
 }
 
 export function escapeHtml(text) {

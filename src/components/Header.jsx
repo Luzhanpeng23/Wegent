@@ -1,17 +1,8 @@
-const THEME_OPTIONS = [
-  { value: 'azure', label: '雾蓝' },
-  { value: 'sage', label: '雾绿' },
-  { value: 'coral', label: '暖珊瑚' },
-  { value: 'slate', label: '石墨灰' },
-]
-
 export default function Header({
   view,
   onClear,
   onOpenSettings,
   onBackToChat,
-  theme,
-  onThemeChange,
 }) {
   const inSettings = view === 'settings'
 
@@ -31,19 +22,6 @@ export default function Header({
       </div>
 
       <div className="header-actions">
-        <label className="theme-field" title="切换配色">
-          <span>配色</span>
-          <select
-            className="theme-select"
-            value={theme}
-            onChange={(e) => onThemeChange(e.target.value)}
-            aria-label="切换配色"
-          >
-            {THEME_OPTIONS.map(item => (
-              <option key={item.value} value={item.value}>{item.label}</option>
-            ))}
-          </select>
-        </label>
 
         {inSettings ? (
           <button className="icon-btn" title="返回对话" onClick={onBackToChat}>

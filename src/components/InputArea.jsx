@@ -213,11 +213,6 @@ export default function InputArea({ onSend, disabled, config }) {
 
   return (
     <footer className="input-area">
-      <div className="input-meta">
-        <span>输入指令</span>
-        <span>Enter 发送 · Shift+Enter 换行</span>
-      </div>
-
       {uploadEnabled && (
         <div className="attachment-hint">
           支持直接粘贴图片（Ctrl+V） · 已选 {attachments.length}/{maxImagesPerTurn}

@@ -439,16 +439,19 @@ chrome.sidePanel
   .catch(() => {});
 
 // ---- API 调用 ----
-async function callAPI(messages) {
+async function callAPI(messages, { stream = false, onDelta, onToolCalls } = {}) {
   const body = {
     model: config.model,
     messages: messages,
     tools: TOOLS,
     tool_choice: "auto",
+    stream: stream,
   };
   if (config.temperature !== undefined) body.temperature = Number(config.temperature);
   if (config.topP !== undefined) body.top_p = Number(config.topP);
   if (config.maxTokens) body.max_tokens = Number(config.maxTokens);
+  // 流式模式下请求返回 usage 信息（可选）
+  if (stream) body.stream_options = { include_usage: true };
 
   const response = await fetch(`${config.apiBase}/chat/completions`, {
     method: "POST",
@@ -464,7 +467,99 @@ async function callAPI(messages) {
     throw new Error(`API 请求失败 (${response.status}): ${errorText}`);
   }
 
-  return await response.json();
+  // 非流式：直接返回 JSON
+  if (!stream) {
+    return await response.json();
+  }
+
+  // ---- 流式处理（SSE） ----
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let contentAccum = "";
+  // tool_calls 的增量合并结构: { index -> { id, type, function: { name, arguments } } }
+  const toolCallsMap = {};
+  let finishReason = null;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    // 保留最后一行（可能不完整）
+    buffer = lines.pop() || "";
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed || !trimmed.startsWith("data:")) continue;
+      const dataStr = trimmed.slice(5).trim();
+      if (dataStr === "[DONE]") continue;
+
+      let parsed;
+      try {
+        parsed = JSON.parse(dataStr);
+      } catch {
+        continue;
+      }
+
+      const delta = parsed.choices?.[0]?.delta;
+      if (!delta) continue;
+
+      finishReason = parsed.choices[0].finish_reason || finishReason;
+
+      // 文本增量
+      if (delta.content) {
+        contentAccum += delta.content;
+        if (onDelta) onDelta(delta.content, contentAccum);
+      }
+
+      // tool_calls 增量
+      if (delta.tool_calls) {
+        for (const tc of delta.tool_calls) {
+          const idx = tc.index;
+          if (!toolCallsMap[idx]) {
+            toolCallsMap[idx] = {
+              id: tc.id || "",
+              type: tc.type || "function",
+              function: { name: tc.function?.name || "", arguments: "" },
+            };
+          } else {
+            if (tc.id) toolCallsMap[idx].id = tc.id;
+            if (tc.function?.name) toolCallsMap[idx].function.name += tc.function.name;
+          }
+          if (tc.function?.arguments) {
+            toolCallsMap[idx].function.arguments += tc.function.arguments;
+          }
+        }
+      }
+    }
+  }
+
+  // 组装工具调用数组
+  const toolCalls = Object.keys(toolCallsMap).length > 0
+    ? Object.keys(toolCallsMap)
+        .sort((a, b) => Number(a) - Number(b))
+        .map((k) => toolCallsMap[k])
+    : undefined;
+
+  if (toolCalls && onToolCalls) onToolCalls(toolCalls);
+
+  // 构造与非流式一致的返回结构
+  const assistantMessage = {
+    role: "assistant",
+    content: contentAccum || null,
+  };
+  if (toolCalls) assistantMessage.tool_calls = toolCalls;
+
+  return {
+    choices: [
+      {
+        message: assistantMessage,
+        finish_reason: finishReason || "stop",
+      },
+    ],
+  };
 }
 
 // ---- 执行工具调用 ----
@@ -567,7 +662,16 @@ async function runAgent(tabId, rawUserInput, sendUpdate) {
 
     while (loopCount < MAX_LOOPS) {
       loopCount++;
-      const response = await callAPI(messages);
+      const response = await callAPI(messages, {
+        stream: true,
+        onDelta: (delta, full) => {
+          sendUpdate({
+            type: "assistant_delta",
+            delta: delta,
+            content: full,
+          });
+        },
+      });
       const choice = response.choices[0];
       const assistantMessage = choice.message;
 
@@ -682,8 +786,115 @@ async function runAgent(tabId, rawUserInput, sendUpdate) {
   }
 }
 
+// ============================================================
+// Cloudflare Turnstile CDP 自动点击
+// ============================================================
+const CDP_DEBUGGER_VERSION = "1.3";
+
+async function attachDebuggerWithRetry(tabId, maxRetries = 3, retryDelay = 500) {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      await new Promise((resolve, reject) => {
+        chrome.debugger.attach({ tabId }, CDP_DEBUGGER_VERSION, () => {
+          if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
+          else resolve();
+        });
+      });
+      return;
+    } catch (error) {
+      console.warn(`[CDP] Attempt ${attempt}/${maxRetries} to attach debugger failed: ${error.message}`);
+      if (attempt < maxRetries) {
+        await new Promise(r => setTimeout(r, retryDelay));
+      } else {
+        throw new Error(`Failed to attach debugger after ${maxRetries} attempts.`);
+      }
+    }
+  }
+}
+
+async function findIframeAndClickAtRatio(tabId, payload) {
+  const { xRatio, yRatio } = payload;
+  const maxRetries = 3;
+  const retryDelay = 1000;
+
+  for (let i = 0; i < maxRetries; i++) {
+    try {
+      function getAttr(attrs, name) {
+        if (!attrs) return undefined;
+        for (let j = 0; j < attrs.length; j += 2) {
+          if (attrs[j] === name) return attrs[j + 1];
+        }
+      }
+
+      const { nodes } = await chrome.debugger.sendCommand({ tabId }, "DOM.getFlattenedDocument", {
+        depth: -1,
+        pierce: true
+      });
+
+      const iframeNode = nodes.find(n => {
+        if (n.nodeName !== 'IFRAME') return false;
+        const src = getAttr(n.attributes, 'src') || '';
+        return src.includes('challenges.cloudflare.com');
+      });
+      if (!iframeNode) throw new Error('Turnstile iframe not found');
+
+      const { model: iframeBox } = await chrome.debugger.sendCommand({ tabId }, "DOM.getBoxModel", {
+        nodeId: iframeNode.nodeId
+      });
+
+      const [x_start, y_start, , , x_end, y_end] = iframeBox.content;
+      const clickX = x_start + ((x_end - x_start) * xRatio);
+      const clickY = y_start + ((y_end - y_start) * yRatio);
+
+      await cdpClickAtCoordinates(tabId, clickX, clickY);
+      return { success: true };
+    } catch (error) {
+      console.warn(`[CDP] Attempt ${i + 1} error:`, error.message || error);
+      if (i < maxRetries - 1) {
+        await new Promise(r => setTimeout(r, retryDelay));
+      }
+    }
+  }
+  return { success: false, error: 'Failed to click iframe after all retries' };
+}
+
+async function cdpClickAtCoordinates(tabId, x, y) {
+  const dispatch = (type, button) => {
+    return chrome.debugger.sendCommand({ tabId }, "Input.dispatchMouseEvent", {
+      type, x, y, button,
+      buttons: button === "left" ? 1 : 0,
+      clickCount: 1
+    });
+  };
+  await dispatch("mousePressed", "left");
+  await new Promise(r => setTimeout(r, Math.random() * 30 + 20));
+  await dispatch("mouseReleased", "left");
+}
+
 // ---- 消息监听 ----
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  // Cloudflare Turnstile 自动点击
+  if (message.action === "detectAndClickTurnstile" && message.payload) {
+    const tabId = sender.tab.id;
+    (async () => {
+      try {
+        await attachDebuggerWithRetry(tabId);
+        const send = (m, p) => chrome.debugger.sendCommand({ tabId }, m, p);
+        await send("Page.enable");
+        await send("Runtime.enable");
+        await send("DOM.enable");
+        const result = await findIframeAndClickAtRatio(tabId, message.payload);
+        sendResponse(result);
+      } catch (error) {
+        console.error('[CDP] Critical error:', error);
+        sendResponse({ success: false, error: error.message });
+      } finally {
+        chrome.debugger.detach({ tabId }, () => {});
+      }
+    })();
+    return true;
+  }
+
   if (sender?.id && sender.id !== chrome.runtime.id) {
     sendResponse({ ok: false, error: "消息来源无效" });
     return true;

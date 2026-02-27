@@ -54,7 +54,7 @@ export default function ChatArea({ messages, chatEndRef, onQuickSend }) {
             case 'user':
               return <UserMessage key={msg.id} text={msg.content} attachments={msg.attachments} />
             case 'assistant':
-              return <AssistantMessage key={msg.id} text={msg.content} />
+              return <AssistantMessage key={msg.id} text={msg.content} streaming={msg.streaming} />
             case 'error':
               return <ErrorMessage key={msg.id} text={msg.content} />
             case 'thinking':
@@ -136,10 +136,13 @@ function UserMessage({ text, attachments = [] }) {
   )
 }
 
-function AssistantMessage({ text }) {
+function AssistantMessage({ text, streaming }) {
   return (
     <div className="message message-assistant">
-      <div className="bubble" dangerouslySetInnerHTML={{ __html: formatMarkdown(text) }} />
+      <div
+        className={`bubble markdown-body${streaming ? ' streaming' : ''}`}
+        dangerouslySetInnerHTML={{ __html: formatMarkdown(text) }}
+      />
     </div>
   )
 }

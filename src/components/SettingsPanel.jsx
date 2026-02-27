@@ -1,6 +1,13 @@
 import { useState, useEffect } from 'react'
 
-export default function SettingsPanel({ config, onSave, onCancel }) {
+const THEME_OPTIONS = [
+  { value: 'azure', label: '雾蓝', color: '#2f6fed' },
+  { value: 'sage', label: '雾绿', color: '#2c8a62' },
+  { value: 'coral', label: '暖珊瑚', color: '#cf674f' },
+  { value: 'slate', label: '石墨灰', color: '#3f5aa8' },
+]
+
+export default function SettingsPanel({ config, onSave, onCancel, theme, onThemeChange }) {
   const [form, setForm] = useState({
     apiBase: '',
     apiKey: '',
@@ -103,6 +110,73 @@ export default function SettingsPanel({ config, onSave, onCancel }) {
       </div>
 
       <div className="settings-page-scroll">
+        <section className="settings-section-card">
+          <div className="settings-section-title">外观主题</div>
+
+          <div className="theme-mode-toggle">
+            <button
+              className={`theme-mode-btn${!theme.endsWith('-dark') && !theme.endsWith('-auto') ? ' active' : ''}`}
+              onClick={() => {
+                const base = theme.replace('-dark', '').replace('-auto', '')
+                onThemeChange(base)
+              }}
+            >
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2">
+                <circle cx="12" cy="12" r="5" />
+                <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42" />
+              </svg>
+              浅色
+            </button>
+            <button
+              className={`theme-mode-btn${theme.endsWith('-dark') ? ' active' : ''}`}
+              onClick={() => {
+                const base = theme.replace('-dark', '').replace('-auto', '')
+                onThemeChange(base + '-dark')
+              }}
+            >
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z" />
+              </svg>
+              深色
+            </button>
+            <button
+              className={`theme-mode-btn${theme.endsWith('-auto') ? ' active' : ''}`}
+              onClick={() => {
+                const base = theme.replace('-dark', '').replace('-auto', '')
+                onThemeChange(base + '-auto')
+              }}
+            >
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2">
+                <rect x="2" y="3" width="20" height="18" rx="3" />
+                <path d="M12 3v18" />
+                <path d="M12 8h5M12 12h6M12 16h4" />
+              </svg>
+              跟随系统
+            </button>
+          </div>
+
+          <div className="theme-palette-grid">
+            {THEME_OPTIONS.map(opt => {
+              const baseTheme = theme.replace('-dark', '').replace('-auto', '')
+              const isActive = baseTheme === opt.value
+              return (
+                <button
+                  key={opt.value}
+                  className={`theme-palette-item${isActive ? ' active' : ''}`}
+                  onClick={() => {
+                    const suffix = theme.endsWith('-dark') ? '-dark' : theme.endsWith('-auto') ? '-auto' : ''
+                    onThemeChange(opt.value + suffix)
+                  }}
+                  title={opt.label}
+                >
+                  <span className="theme-palette-dot" style={{ background: opt.color }} />
+                  <span className="theme-palette-label">{opt.label}</span>
+                </button>
+              )
+            })}
+          </div>
+        </section>
+
         <section className="settings-section-card">
           <div className="settings-section-title">API 配置</div>
 

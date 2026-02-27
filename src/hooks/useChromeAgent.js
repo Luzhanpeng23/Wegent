@@ -116,13 +116,49 @@ export function useChromeAgent() {
           }])
           break
 
+        case 'assistant_delta':
+          // 流式增量：累积更新最后一条 assistant 消息，或新建一条
+          setMessages(prev => {
+            const filtered = prev.filter(m => m.type !== 'thinking')
+            const last = filtered[filtered.length - 1]
+            if (last && last.type === 'assistant' && last.streaming) {
+              // 更新已有 streaming 消息
+              const updated = [...filtered]
+              updated[updated.length - 1] = {
+                ...last,
+                content: p.content || '',
+              }
+              return updated
+            }
+            // 新建 streaming 消息
+            return [...filtered, {
+              type: 'assistant',
+              id: Date.now(),
+              content: p.content || p.delta || '',
+              streaming: true,
+            }]
+          })
+          break
+
         case 'assistant_message':
           setMessages(prev => {
             const filtered = prev.filter(m => m.type !== 'thinking')
+            const last = filtered[filtered.length - 1]
+            // 如果最后一条是 streaming 消息，标记完成
+            if (last && last.type === 'assistant' && last.streaming) {
+              const updated = [...filtered]
+              updated[updated.length - 1] = {
+                ...last,
+                content: p.content || last.content || '',
+                streaming: false,
+              }
+              return updated
+            }
             return [...filtered, {
               type: 'assistant',
               id: Date.now(),
               content: p.content || '',
+              streaming: false,
             }]
           })
           setIsProcessing(false)

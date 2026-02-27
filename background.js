@@ -4,6 +4,21 @@
 // ============================================================
 
 // ---- 配置 ----
+const DEFAULT_MULTIMODAL = {
+  enabled: true,
+  modelSupportsVision: true,
+  allowUserImageUpload: true,
+  allowToolScreenshotToModel: true,
+  maxImagesPerTurn: 2,
+  maxImageBytes: 800 * 1024,
+  maxTotalImageBytesPerTurn: 1200 * 1024,
+  imageMaxWidth: 1280,
+  imageMaxHeight: 1280,
+  imageFormat: "jpeg",
+  imageQuality: 0.82,
+  screenshotDetail: "low",
+};
+
 const DEFAULT_CONFIG = {
   apiBase: "https://api.openai.com/v1",
   apiKey: "",
@@ -12,6 +27,7 @@ const DEFAULT_CONFIG = {
   temperature: 0.7,
   topP: 1,
   maxTokens: 4096,
+  multimodal: { ...DEFAULT_MULTIMODAL },
   systemPrompt: `你是一个浏览器操作助手。用户会用自然语言描述他们想在当前网页上执行的操作，你需要通过调用工具来完成这些操作。
 
 操作前请先使用 get_page_info 了解当前页面状态，然后根据需要使用 get_elements 获取页面元素信息。
@@ -248,20 +264,172 @@ const TOOLS = [
 ];
 
 // ---- 状态管理 ----
-let config = { ...DEFAULT_CONFIG };
+let config = {
+  ...DEFAULT_CONFIG,
+  multimodal: { ...DEFAULT_MULTIMODAL },
+};
 let conversations = new Map(); // tabId -> messages[]
+
+function mergeConfig(baseConfig = {}) {
+  return {
+    ...DEFAULT_CONFIG,
+    ...baseConfig,
+    multimodal: {
+      ...DEFAULT_MULTIMODAL,
+      ...(baseConfig.multimodal || {}),
+    },
+  };
+}
+
+function normalizeUserInput(userInput) {
+  if (typeof userInput === "string") {
+    return { text: userInput, attachments: [] };
+  }
+
+  return {
+    text: typeof userInput?.text === "string" ? userInput.text : "",
+    attachments: Array.isArray(userInput?.attachments) ? userInput.attachments : [],
+  };
+}
+
+function estimateDataUrlBytes(dataUrl) {
+  if (typeof dataUrl !== "string") return 0;
+  const parts = dataUrl.split(",");
+  if (parts.length < 2) return 0;
+  const base64 = parts[1] || "";
+  const paddingMatch = base64.match(/=+$/);
+  const padding = paddingMatch ? paddingMatch[0].length : 0;
+  return Math.max(0, Math.floor((base64.length * 3) / 4) - padding);
+}
+
+function clampNumber(value, fallback, min, max) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return fallback;
+  return Math.min(max, Math.max(min, num));
+}
+
+function getMultimodalConfig() {
+  const mm = {
+    ...DEFAULT_MULTIMODAL,
+    ...(config.multimodal || {}),
+  };
+
+  return {
+    ...mm,
+    maxImagesPerTurn: Math.floor(clampNumber(mm.maxImagesPerTurn, DEFAULT_MULTIMODAL.maxImagesPerTurn, 1, 10)),
+    maxImageBytes: Math.floor(clampNumber(mm.maxImageBytes, DEFAULT_MULTIMODAL.maxImageBytes, 64 * 1024, 10 * 1024 * 1024)),
+    maxTotalImageBytesPerTurn: Math.floor(
+      clampNumber(mm.maxTotalImageBytesPerTurn, DEFAULT_MULTIMODAL.maxTotalImageBytesPerTurn, 128 * 1024, 20 * 1024 * 1024)
+    ),
+    imageMaxWidth: Math.floor(clampNumber(mm.imageMaxWidth, DEFAULT_MULTIMODAL.imageMaxWidth, 256, 4096)),
+    imageMaxHeight: Math.floor(clampNumber(mm.imageMaxHeight, DEFAULT_MULTIMODAL.imageMaxHeight, 256, 4096)),
+    imageQuality: clampNumber(mm.imageQuality, DEFAULT_MULTIMODAL.imageQuality, 0.2, 1),
+    screenshotDetail: mm.screenshotDetail === "auto" ? "auto" : "low",
+  };
+}
+
+function isVisionEnabled(multimodal) {
+  return !!(multimodal.enabled && multimodal.modelSupportsVision);
+}
+
+function normalizeAttachment(raw) {
+  if (!raw || raw.kind !== "image") return null;
+  if (typeof raw.dataUrl !== "string" || !raw.dataUrl.startsWith("data:image/")) return null;
+
+  const mimeType = typeof raw.mimeType === "string" && raw.mimeType.startsWith("image/")
+    ? raw.mimeType
+    : "image/jpeg";
+
+  const sizeBytes = Number(raw.sizeBytes) > 0 ? Number(raw.sizeBytes) : estimateDataUrlBytes(raw.dataUrl);
+  if (!Number.isFinite(sizeBytes) || sizeBytes <= 0) return null;
+
+  return {
+    id: raw.id || `att_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+    kind: "image",
+    source: raw.source || "upload",
+    mimeType,
+    dataUrl: raw.dataUrl,
+    width: Number(raw.width) || undefined,
+    height: Number(raw.height) || undefined,
+    sizeBytes,
+  };
+}
+
+function sanitizeAttachments(rawAttachments, multimodal) {
+  if (!Array.isArray(rawAttachments) || rawAttachments.length === 0) return [];
+
+  const accepted = [];
+  const maxCount = multimodal.maxImagesPerTurn;
+  const maxImageBytes = multimodal.maxImageBytes;
+  const maxTotalBytes = multimodal.maxTotalImageBytesPerTurn;
+  let totalBytes = 0;
+
+  for (const raw of rawAttachments) {
+    if (accepted.length >= maxCount) break;
+
+    const attachment = normalizeAttachment(raw);
+    if (!attachment) continue;
+    if (attachment.sizeBytes > maxImageBytes) continue;
+    if (totalBytes + attachment.sizeBytes > maxTotalBytes) continue;
+
+    accepted.push(attachment);
+    totalBytes += attachment.sizeBytes;
+  }
+
+  return accepted;
+}
+
+function buildUserMessage(text, attachments, multimodal) {
+  const safeText = typeof text === "string" ? text : "";
+
+  if (!isVisionEnabled(multimodal) || !attachments.length) {
+    return { role: "user", content: safeText };
+  }
+
+  const content = [];
+  if (safeText.trim()) {
+    content.push({ type: "text", text: safeText });
+  }
+
+  for (const attachment of attachments) {
+    content.push({
+      type: "image_url",
+      image_url: {
+        url: attachment.dataUrl,
+        detail: multimodal.screenshotDetail,
+      },
+    });
+  }
+
+  if (content.length === 0) {
+    content.push({ type: "text", text: "请先识别图片内容，再继续执行用户目标。" });
+  }
+
+  return { role: "user", content };
+}
 
 // 加载配置
 async function loadConfig() {
   const stored = await chrome.storage.local.get("domAgentConfig");
   if (stored.domAgentConfig) {
-    config = { ...DEFAULT_CONFIG, ...stored.domAgentConfig };
+    config = mergeConfig(stored.domAgentConfig);
+  } else {
+    config = mergeConfig(config);
   }
 }
 
 // 保存配置
 async function saveConfig(newConfig) {
-  config = { ...config, ...newConfig };
+  const merged = {
+    ...config,
+    ...(newConfig || {}),
+    multimodal: {
+      ...(config.multimodal || {}),
+      ...((newConfig && newConfig.multimodal) || {}),
+    },
+  };
+
+  config = mergeConfig(merged);
   await chrome.storage.local.set({ domAgentConfig: config });
 }
 
@@ -344,7 +512,7 @@ async function executeTool(tabId, name, args) {
 }
 
 // ---- Agent 循环 ----
-async function runAgent(tabId, userMessage, sendUpdate) {
+async function runAgent(tabId, rawUserInput, sendUpdate) {
   // 每次运行前重新加载配置，防止 service worker 重启后丢失内存中的配置
   await loadConfig();
 
@@ -356,14 +524,38 @@ async function runAgent(tabId, userMessage, sendUpdate) {
     return;
   }
 
+  const multimodal = getMultimodalConfig();
+  const userInput = normalizeUserInput(rawUserInput);
+
+  let attachments = [];
+  if (multimodal.enabled && multimodal.allowUserImageUpload) {
+    attachments = sanitizeAttachments(userInput.attachments, multimodal);
+  }
+
+  const visionEnabled = isVisionEnabled(multimodal);
+
+  if (!userInput.text.trim() && attachments.length === 0) {
+    sendUpdate({
+      type: "error",
+      message: "请输入文本或上传图片后再发送。",
+    });
+    return;
+  }
+
+  if (!visionEnabled && !userInput.text.trim() && attachments.length > 0) {
+    sendUpdate({
+      type: "error",
+      message: "当前模型未启用视觉能力，请输入文本或在设置中开启视觉支持。",
+    });
+    return;
+  }
+
   // 获取或创建会话
   if (!conversations.has(tabId)) {
-    conversations.set(tabId, [
-      { role: "system", content: config.systemPrompt },
-    ]);
+    conversations.set(tabId, [{ role: "system", content: config.systemPrompt }]);
   }
   const messages = conversations.get(tabId);
-  messages.push({ role: "user", content: userMessage });
+  messages.push(buildUserMessage(userInput.text, attachments, multimodal));
 
   sendUpdate({ type: "thinking" });
 
@@ -382,10 +574,7 @@ async function runAgent(tabId, userMessage, sendUpdate) {
       messages.push(assistantMessage);
 
       // 如果没有工具调用，返回最终回复
-      if (
-        !assistantMessage.tool_calls ||
-        assistantMessage.tool_calls.length === 0
-      ) {
+      if (!assistantMessage.tool_calls || assistantMessage.tool_calls.length === 0) {
         sendUpdate({
           type: "assistant_message",
           content: assistantMessage.content || "",
@@ -425,13 +614,48 @@ async function runAgent(tabId, userMessage, sendUpdate) {
           loopIndex: loopCount,
         });
 
-        // 截图结果太大，只传摘要给 API
+        // 截图默认传摘要；在开启视觉回注时追加图片用户消息
         let toolResult = result;
+        let screenshotFollowupMessage = null;
+
         if (funcName === "take_screenshot" && result.screenshot) {
-          toolResult = {
-            success: true,
-            message: "截图已成功捕获并展示给用户",
-          };
+          if (isVisionEnabled(multimodal) && multimodal.allowToolScreenshotToModel) {
+            const screenshotAttachment = sanitizeAttachments(
+              [
+                {
+                  id: `shot_${Date.now()}`,
+                  kind: "image",
+                  source: "tool_screenshot",
+                  mimeType: "image/png",
+                  dataUrl: result.screenshot,
+                  sizeBytes: estimateDataUrlBytes(result.screenshot),
+                },
+              ],
+              multimodal
+            );
+
+            if (screenshotAttachment.length > 0) {
+              screenshotFollowupMessage = buildUserMessage(
+                "这是当前页面截图，请先识别关键视觉信息，再决定下一步工具调用。",
+                screenshotAttachment,
+                multimodal
+              );
+              toolResult = {
+                success: true,
+                message: "截图已捕获并用于视觉推理。",
+              };
+            } else {
+              toolResult = {
+                success: true,
+                message: "截图已捕获，但因大小限制未加入视觉上下文。",
+              };
+            }
+          } else {
+            toolResult = {
+              success: true,
+              message: "截图已成功捕获并展示给用户",
+            };
+          }
         }
 
         messages.push({
@@ -439,6 +663,10 @@ async function runAgent(tabId, userMessage, sendUpdate) {
           tool_call_id: toolCall.id,
           content: JSON.stringify(toolResult),
         });
+
+        if (screenshotFollowupMessage) {
+          messages.push(screenshotFollowupMessage);
+        }
       }
     }
 
@@ -456,12 +684,24 @@ async function runAgent(tabId, userMessage, sendUpdate) {
 
 // ---- 消息监听 ----
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (sender?.id && sender.id !== chrome.runtime.id) {
+    sendResponse({ ok: false, error: "消息来源无效" });
+    return true;
+  }
+
   if (message.type === "CHAT_MESSAGE") {
-    const { tabId, text } = message;
-    runAgent(tabId, text, (update) => {
-      // 发送更新到 sidepanel
-      chrome.runtime.sendMessage({ type: "AGENT_UPDATE", payload: update }).catch(() => {});
-    });
+    const { tabId, text, attachments } = message;
+    runAgent(
+      tabId,
+      {
+        text: text || "",
+        attachments: Array.isArray(attachments) ? attachments : [],
+      },
+      (update) => {
+        // 发送更新到 sidepanel
+        chrome.runtime.sendMessage({ type: "AGENT_UPDATE", payload: update }).catch(() => {});
+      }
+    );
     sendResponse({ ok: true });
     return true;
   }

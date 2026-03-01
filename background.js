@@ -438,6 +438,37 @@ chrome.sidePanel
   .setPanelBehavior({ openPanelOnActionClick: true })
   .catch(() => {});
 
+// ---- 快捷键切换侧边栏 ----
+let sidePanelOpen = false;
+
+chrome.commands.onCommand.addListener(async (command) => {
+  if (command === 'toggle-side-panel') {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab) return;
+    const windowId = tab.windowId;
+    if (sidePanelOpen) {
+      // 关闭：先禁用再重新启用
+      await chrome.sidePanel.setOptions({ enabled: false });
+      await chrome.sidePanel.setOptions({ enabled: true, path: 'sidepanel/index.html' });
+      sidePanelOpen = false;
+    } else {
+      // 打开
+      await chrome.sidePanel.open({ windowId });
+      sidePanelOpen = true;
+    }
+  }
+});
+
+// 监听侧边栏连接状态
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name === 'sidepanel-alive') {
+    sidePanelOpen = true;
+    port.onDisconnect.addListener(() => {
+      sidePanelOpen = false;
+    });
+  }
+});
+
 // ---- API 调用 ----
 async function callAPI(messages, { stream = false, onDelta, onToolCalls } = {}) {
   const body = {

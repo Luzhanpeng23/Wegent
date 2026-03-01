@@ -48,10 +48,16 @@ export function useChromeAgent() {
       setConfig(cfg)
     })
 
+    // 建立长连接，让 background 追踪侧边栏开关状态
+    const port = chrome.runtime.connect({ name: 'sidepanel-alive' })
+
     // 标签页切换监听
     const handleActivated = (info) => setTabId(info.tabId)
     chrome.tabs.onActivated.addListener(handleActivated)
-    return () => chrome.tabs.onActivated.removeListener(handleActivated)
+    return () => {
+      chrome.tabs.onActivated.removeListener(handleActivated)
+      port.disconnect()
+    }
   }, [])
 
   // 监听 background 发来的 Agent 更新

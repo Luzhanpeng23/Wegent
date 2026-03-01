@@ -1,21 +1,12 @@
 import { useMemo, useRef, useState } from 'react'
+import { ImagePlus, SendHorizontal, X } from 'lucide-react'
+import { Alert, AlertDescription } from '@/components/ui/alert'
+import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import { Textarea } from '@/components/ui/textarea'
 
 const DEFAULT_MULTIMODAL = {
-  enabled: true,
   modelSupportsVision: true,
-  allowUserImageUpload: true,
-  maxImagesPerTurn: 2,
-  maxImageBytes: 800 * 1024,
-  imageMaxWidth: 1280,
-  imageMaxHeight: 1280,
-  imageFormat: 'jpeg',
-  imageQuality: 0.82,
-}
-
-function clampNumber(value, fallback, min, max) {
-  const num = Number(value)
-  if (!Number.isFinite(num)) return fallback
-  return Math.min(max, Math.max(min, num))
 }
 
 function estimateDataUrlBytes(dataUrl) {
@@ -46,12 +37,12 @@ function loadImage(src) {
   })
 }
 
-async function compressImageDataUrl(dataUrl, options) {
+async function compressImageDataUrl(dataUrl) {
   const image = await loadImage(dataUrl)
-  const maxWidth = clampNumber(options.imageMaxWidth, 1280, 256, 4096)
-  const maxHeight = clampNumber(options.imageMaxHeight, 1280, 256, 4096)
-  const quality = clampNumber(options.imageQuality, 0.82, 0.2, 1)
-  const format = options.imageFormat === 'png' ? 'png' : 'jpeg'
+  const maxWidth = 1280
+  const maxHeight = 1280
+  const quality = 0.82
+  const mimeType = 'image/jpeg'
 
   const ratio = Math.min(maxWidth / image.width, maxHeight / image.height, 1)
   const width = Math.max(1, Math.round(image.width * ratio))
@@ -65,7 +56,6 @@ async function compressImageDataUrl(dataUrl, options) {
 
   ctx.drawImage(image, 0, 0, width, height)
 
-  const mimeType = format === 'png' ? 'image/png' : 'image/jpeg'
   const outputDataUrl = canvas.toDataURL(mimeType, quality)
 
   return {
@@ -89,9 +79,9 @@ export default function InputArea({ onSend, disabled, config }) {
     ...((config && config.multimodal) || {}),
   }), [config])
 
-  const uploadEnabled = !!(multimodal.enabled && multimodal.allowUserImageUpload)
-  const maxImagesPerTurn = Math.floor(clampNumber(multimodal.maxImagesPerTurn, 2, 1, 10))
-  const maxImageBytes = Math.floor(clampNumber(multimodal.maxImageBytes, 800 * 1024, 64 * 1024, 10 * 1024 * 1024))
+  const uploadEnabled = !!multimodal.modelSupportsVision
+  const maxImagesPerTurn = 10
+  const maxImageBytes = 20 * 1024 * 1024
 
   const resetTextareaHeight = () => {
     if (textareaRef.current) {
@@ -163,7 +153,7 @@ export default function InputArea({ onSend, disabled, config }) {
 
       for (const file of candidates) {
         const originalDataUrl = await readFileAsDataUrl(file)
-        const compressed = await compressImageDataUrl(originalDataUrl, multimodal)
+        const compressed = await compressImageDataUrl(originalDataUrl)
 
         if (compressed.sizeBytes > maxImageBytes) {
           continue
@@ -212,56 +202,63 @@ export default function InputArea({ onSend, disabled, config }) {
   }
 
   return (
-    <footer className="input-area">
-      {uploadEnabled && (
-        <div className="attachment-hint">
-          支持直接粘贴图片（Ctrl+V） · 已选 {attachments.length}/{maxImagesPerTurn}
+    <footer className="border-t bg-background p-3">
+      <div className="space-y-2">
+        {uploadEnabled && (
+          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+            <ImagePlus className="h-3.5 w-3.5" />
+            <span>支持直接粘贴图片（Ctrl+V）</span>
+            <Badge variant="secondary">{attachments.length}/{maxImagesPerTurn}</Badge>
+          </div>
+        )}
+
+        {uploadError && (
+          <Alert variant="destructive" className="py-2">
+            <AlertDescription>{uploadError}</AlertDescription>
+          </Alert>
+        )}
+
+        {attachments.length > 0 && (
+          <div className="flex flex-wrap gap-2">
+            {attachments.map(item => (
+              <div key={item.id} className="relative h-12 w-12 overflow-hidden rounded-md border bg-muted">
+                <img src={item.dataUrl} alt="上传预览" className="h-full w-full object-cover" />
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="icon-xs"
+                  className="absolute top-0.5 right-0.5 h-4 w-4 p-0"
+                  onClick={() => handleRemoveAttachment(item.id)}
+                >
+                  <X className="h-3 w-3" />
+                </Button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <div className="relative">
+          <Textarea
+            ref={textareaRef}
+            value={text}
+            onChange={handleInput}
+            onKeyDown={handleKeyDown}
+            onPaste={handlePaste}
+            placeholder="描述你想执行的网页操作..."
+            rows={1}
+            className="min-h-[42px] max-h-[120px] resize-none pr-12"
+          />
+
+          <Button
+            type="button"
+            size="icon-sm"
+            className="absolute right-2 bottom-2"
+            onClick={handleSend}
+            disabled={disabled || isPreparingImage || (!text.trim() && attachments.length === 0)}
+          >
+            <SendHorizontal className="h-4 w-4" />
+          </Button>
         </div>
-      )}
-
-      {uploadError && <div className="attachment-error">{uploadError}</div>}
-
-      {attachments.length > 0 && (
-        <div className="attachment-list">
-          {attachments.map(item => (
-            <div key={item.id} className="attachment-item">
-              <img src={item.dataUrl} alt="上传预览" className="attachment-thumb" />
-              <button
-                type="button"
-                className="attachment-remove"
-                onClick={() => handleRemoveAttachment(item.id)}
-                title="移除图片"
-              >
-                <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2">
-                  <path d="M6 6l12 12M18 6L6 18" />
-                </svg>
-              </button>
-            </div>
-          ))}
-        </div>
-      )}
-
-      <div className="input-wrapper">
-        <textarea
-          ref={textareaRef}
-          value={text}
-          onChange={handleInput}
-          onKeyDown={handleKeyDown}
-          onPaste={handlePaste}
-          placeholder="描述你想执行的网页操作..."
-          rows="1"
-        />
-
-        <button
-          className="send-btn"
-          onClick={handleSend}
-          disabled={disabled || isPreparingImage || (!text.trim() && attachments.length === 0)}
-          title="发送"
-        >
-          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2">
-            <path d="M3 11.5L21 3l-8.5 18-2-7L3 11.5z" />
-          </svg>
-        </button>
       </div>
     </footer>
   )

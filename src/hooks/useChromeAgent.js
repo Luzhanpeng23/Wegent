@@ -13,22 +13,11 @@ const DEV_CONFIG = {
   temperature: 0.7,
   topP: 1,
   maxTokens: 4096,
+  themeMode: 'light',
   multimodal: {
-    enabled: true,
     modelSupportsVision: true,
-    allowUserImageUpload: true,
-    allowToolScreenshotToModel: true,
-    maxImagesPerTurn: 2,
-    maxImageBytes: 800 * 1024,
-    maxTotalImageBytesPerTurn: 1200 * 1024,
-    imageMaxWidth: 1280,
-    imageMaxHeight: 1280,
-    imageFormat: 'jpeg',
-    imageQuality: 0.82,
-    screenshotDetail: 'low',
+    imageDetail: 'auto',
   },
-  // 旧版可执行技能（兼容保留）
-  skills: [],
   // Claude Code 风格 Skill Packages
   skillPackages: [],
   skillRuntime: {
@@ -262,11 +251,11 @@ export function useChromeAgent() {
     setConfig(prev => ({
       ...(prev || DEV_CONFIG),
       ...(newConfig || {}),
+      themeMode: (newConfig?.themeMode || prev?.themeMode || DEV_CONFIG.themeMode),
       multimodal: {
         ...((prev && prev.multimodal) || DEV_CONFIG.multimodal),
         ...((newConfig && newConfig.multimodal) || {}),
       },
-      skills: Array.isArray(newConfig?.skills) ? newConfig.skills : (prev?.skills || []),
       skillPackages: Array.isArray(newConfig?.skillPackages) ? newConfig.skillPackages : (prev?.skillPackages || []),
       skillRuntime: {
         ...((prev && prev.skillRuntime) || DEV_CONFIG.skillRuntime),

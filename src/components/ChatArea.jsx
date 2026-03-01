@@ -1,3 +1,8 @@
+import { Camera, FileSearch, Link2, ScrollText } from 'lucide-react'
+import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import { Card } from '@/components/ui/card'
+import { ScrollArea } from '@/components/ui/scroll-area'
 import ToolCallCard from './ToolCallCard'
 import { formatMarkdown } from '../utils/markdown'
 
@@ -9,35 +14,114 @@ const SUGGESTIONS = [
 ]
 
 function SuggestionIcon({ name }) {
-  if (name === 'doc') {
-    return (
-      <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2">
-        <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" />
-        <path d="M14 2v6h6" />
-      </svg>
-    )
-  }
-  if (name === 'link') {
-    return (
-      <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2">
-        <path d="M10 13a5 5 0 007.54.54l2.92-2.92a5 5 0 00-7.07-7.07L11 6" />
-        <path d="M14 11a5 5 0 00-7.54-.54l-2.92 2.92a5 5 0 007.07 7.07L13 18" />
-      </svg>
-    )
-  }
-  if (name === 'down') {
-    return (
-      <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2">
-        <path d="M12 5v14" />
-        <path d="M19 12l-7 7-7-7" />
-      </svg>
-    )
-  }
+  if (name === 'doc') return <FileSearch className="h-3.5 w-3.5" />
+  if (name === 'link') return <Link2 className="h-3.5 w-3.5" />
+  if (name === 'down') return <ScrollText className="h-3.5 w-3.5" />
+  return <Camera className="h-3.5 w-3.5" />
+}
+
+function WelcomeMessage({ onQuickSend }) {
   return (
-    <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2">
-      <path d="M4 7h3l2-2h6l2 2h3v12H4z" />
-      <circle cx="12" cy="13" r="3" />
-    </svg>
+    <Card className="ml-2 gap-3 py-4">
+      <div className="px-4">
+        <div className="mb-3 inline-flex h-9 w-9 items-center justify-center rounded-md border bg-muted text-primary">
+          <ScrollText className="h-4 w-4" />
+        </div>
+        <h2 className="text-sm font-semibold">开始一次结构化网页操作</h2>
+        <p className="mt-1 text-xs text-muted-foreground">直接输入目标，或从下面的快捷动作开始。</p>
+
+        <div className="mt-3 flex flex-wrap gap-2">
+          {SUGGESTIONS.map((s) => (
+            <Button
+              key={s.text}
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-7 gap-1.5 px-2.5 text-xs"
+              onClick={() => onQuickSend(s.text)}
+            >
+              <SuggestionIcon name={s.icon} />
+              {s.label}
+            </Button>
+          ))}
+        </div>
+      </div>
+    </Card>
+  )
+}
+
+function UserMessage({ text, attachments = [] }) {
+  return (
+    <div className="flex justify-end">
+      <Card className="max-w-[88%] gap-2 border-primary/15 bg-primary py-2 text-primary-foreground">
+        <div className="px-3 text-sm leading-relaxed">{text || ''}</div>
+        {attachments.length > 0 ? (
+          <div className="flex flex-wrap gap-2 px-3 pb-1">
+            {attachments.map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                className="h-12 w-12 overflow-hidden rounded border border-white/30 bg-white/10"
+                onClick={() => window.open(item.dataUrl, '_blank')}
+                title="查看图片"
+              >
+                <img src={item.dataUrl} alt="用户上传图片" className="h-full w-full object-cover" />
+              </button>
+            ))}
+          </div>
+        ) : null}
+      </Card>
+    </div>
+  )
+}
+
+function AssistantMessage({ text, streaming }) {
+  return (
+    <div className="flex justify-start">
+      <Card className="ml-2 max-w-[88%] gap-0 py-0">
+        <div
+          className={`markdown-body px-3 py-2 text-sm leading-relaxed ${streaming ? 'streaming' : ''}`}
+          dangerouslySetInnerHTML={{ __html: formatMarkdown(text) }}
+        />
+      </Card>
+    </div>
+  )
+}
+
+function ErrorMessage({ text }) {
+  return (
+    <div className="flex justify-start">
+      <Card className="ml-2 max-w-[88%] gap-0 border-destructive/30 bg-destructive/10 py-0 text-destructive">
+        <div className="px-3 py-2 text-sm">{text}</div>
+      </Card>
+    </div>
+  )
+}
+
+function ThinkingIndicator() {
+  return (
+    <div className="flex justify-start">
+      <Card className="ml-2 inline-flex flex-row items-center gap-2 py-2 pl-3 pr-3">
+        <div className="flex gap-1">
+          <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-primary [animation-delay:-0.3s]" />
+          <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-primary [animation-delay:-0.15s]" />
+          <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-primary" />
+        </div>
+        <span className="text-xs text-muted-foreground">思考中...</span>
+      </Card>
+    </div>
+  )
+}
+
+function Screenshot({ data }) {
+  return (
+    <div className="flex justify-start">
+      <Card className="ml-2 max-w-[88%] overflow-hidden py-0">
+        <button type="button" className="block" onClick={() => window.open(data, '_blank')}>
+          <img src={data} alt="页面截图" className="block w-full" />
+        </button>
+      </Card>
+    </div>
   )
 }
 
@@ -45,136 +129,47 @@ export default function ChatArea({ messages, chatEndRef, onQuickSend }) {
   const isEmpty = messages.length === 0
 
   return (
-    <main className="chat-container">
-      <div className="chat-stream">
-        {isEmpty && <WelcomeMessage onQuickSend={onQuickSend} />}
-
-        {messages.map(msg => {
-          switch (msg.type) {
-            case 'user':
-              return <UserMessage key={msg.id} text={msg.content} attachments={msg.attachments} />
-            case 'assistant':
-              return <AssistantMessage key={msg.id} text={msg.content} streaming={msg.streaming} />
-            case 'error':
-              return <ErrorMessage key={msg.id} text={msg.content} />
-            case 'thinking':
-              return <ThinkingIndicator key={msg.id} />
-            case 'tool_call':
-              return (
-                <ToolCallCard
-                  key={msg.id}
-                  name={msg.name}
-                  args={msg.args}
-                  status={msg.status}
-                  result={msg.result}
-                  duration={msg.duration}
-                  index={msg.index}
-                />
-              )
-            case 'screenshot':
-              return <Screenshot key={msg.id} data={msg.data} />
-            default:
-              return null
-          }
-        })}
-
-        <div ref={chatEndRef} />
-      </div>
-    </main>
-  )
-}
-
-function WelcomeMessage({ onQuickSend }) {
-  return (
-    <section className="welcome-message">
-      <div className="welcome-icon">
-        <svg viewBox="0 0 24 24" width="36" height="36" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round">
-          <rect x="3" y="3" width="18" height="18" rx="3" />
-          <path d="M8 12h8M12 8v8" />
-        </svg>
-      </div>
-
-      <div className="welcome-copy">
-        <h2>开始一次结构化网页操作</h2>
-        <p>直接输入目标，或从下面的快捷动作开始。</p>
-      </div>
-
-      <div className="suggestion-chips">
-        {SUGGESTIONS.map(s => (
-          <button key={s.text} className="chip" onClick={() => onQuickSend(s.text)}>
-            <SuggestionIcon name={s.icon} />
-            <span>{s.label}</span>
-          </button>
-        ))}
-      </div>
-    </section>
-  )
-}
-
-function UserMessage({ text, attachments = [] }) {
-  return (
-    <div className="message message-user">
-      <div className="bubble bubble-user">
-        {text ? <div>{text}</div> : null}
-        {attachments.length > 0 ? (
-          <div className="message-attachments">
-            {attachments.map(item => (
-              <button
-                key={item.id}
-                type="button"
-                className="message-attachment"
-                onClick={() => window.open(item.dataUrl, '_blank')}
-                title="查看图片"
-              >
-                <img src={item.dataUrl} alt="用户上传图片" />
-              </button>
-            ))}
+    <main className="min-h-0 flex-1 bg-background">
+      <ScrollArea className="h-full">
+        <div className="space-y-3 px-3 py-3">
+          <div className="px-2">
+            <Badge variant="secondary">会话</Badge>
           </div>
-        ) : null}
-      </div>
-    </div>
-  )
-}
 
-function AssistantMessage({ text, streaming }) {
-  return (
-    <div className="message message-assistant">
-      <div
-        className={`bubble markdown-body${streaming ? ' streaming' : ''}`}
-        dangerouslySetInnerHTML={{ __html: formatMarkdown(text) }}
-      />
-    </div>
-  )
-}
+          {isEmpty && <WelcomeMessage onQuickSend={onQuickSend} />}
 
-function ErrorMessage({ text }) {
-  return (
-    <div className="message message-error">
-      <div className="bubble bubble-error">{text}</div>
-    </div>
-  )
-}
+          {messages.map((msg) => {
+            switch (msg.type) {
+              case 'user':
+                return <UserMessage key={msg.id} text={msg.content} attachments={msg.attachments} />
+              case 'assistant':
+                return <AssistantMessage key={msg.id} text={msg.content} streaming={msg.streaming} />
+              case 'error':
+                return <ErrorMessage key={msg.id} text={msg.content} />
+              case 'thinking':
+                return <ThinkingIndicator key={msg.id} />
+              case 'tool_call':
+                return (
+                  <ToolCallCard
+                    key={msg.id}
+                    name={msg.name}
+                    args={msg.args}
+                    status={msg.status}
+                    result={msg.result}
+                    duration={msg.duration}
+                    index={msg.index}
+                  />
+                )
+              case 'screenshot':
+                return <Screenshot key={msg.id} data={msg.data} />
+              default:
+                return null
+            }
+          })}
 
-function ThinkingIndicator() {
-  return (
-    <div className="thinking">
-      <div className="thinking-dots">
-        <span /><span /><span />
-      </div>
-      <span className="thinking-text">思考中...</span>
-    </div>
-  )
-}
-
-function Screenshot({ data }) {
-  return (
-    <div className="screenshot-wrapper">
-      <img
-        src={data}
-        className="screenshot-img"
-        alt="页面截图"
-        onClick={() => window.open(data, '_blank')}
-      />
-    </div>
+          <div ref={chatEndRef} />
+        </div>
+      </ScrollArea>
+    </main>
   )
 }

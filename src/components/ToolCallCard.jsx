@@ -1,4 +1,13 @@
 import { useState } from 'react'
+import { ChevronRight, Loader2 } from 'lucide-react'
+import { Badge } from '@/components/ui/badge'
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from '@/components/ui/collapsible'
+import { Card } from '@/components/ui/card'
+import { Separator } from '@/components/ui/separator'
 
 const TOOL_LABELS = {
   navigate: '导航',
@@ -28,17 +37,44 @@ function truncate(str, max = 40) {
   return str.slice(0, max) + '...'
 }
 
+function StatusBadge({ status, duration }) {
+  if (status === 'running') {
+    return (
+      <Badge variant="secondary" className="gap-1">
+        <Loader2 className="h-3 w-3 animate-spin" />
+        执行中
+      </Badge>
+    )
+  }
+
+  if (status === 'success') {
+    return (
+      <Badge variant="outline" className="border-emerald-200 text-emerald-700">
+        完成{duration != null ? ` · ${duration}ms` : ''}
+      </Badge>
+    )
+  }
+
+  if (status === 'error') {
+    return (
+      <Badge variant="destructive">
+        失败{duration != null ? ` · ${duration}ms` : ''}
+      </Badge>
+    )
+  }
+
+  return null
+}
+
 export default function ToolCallCard({ name, args, status, result, duration, index }) {
   const [expanded, setExpanded] = useState(false)
   const label = TOOL_LABELS[name] || name
 
-  // 参数摘要
   const summaryParts = Object.entries(args || {})
     .slice(0, 2)
     .map(([, v]) => truncate(typeof v === 'string' ? v : JSON.stringify(v)))
   const summary = summaryParts.join(', ')
 
-  // 过滤掉截图 base64 数据
   const displayResult = result
     ? result.screenshot
       ? { ...result, screenshot: '[base64 图片数据已省略]' }
@@ -46,72 +82,58 @@ export default function ToolCallCard({ name, args, status, result, duration, ind
     : null
 
   return (
-    <div className="tool-call">
-      <div className="tool-call-header" onClick={() => setExpanded(v => !v)}>
-        <div className="tool-call-left">
-          <svg
-            className={`tool-call-chevron ${expanded ? 'expanded' : ''}`}
-            viewBox="0 0 24 24" width="14" height="14"
-            fill="none" stroke="currentColor" strokeWidth="2.5"
+    <Collapsible open={expanded} onOpenChange={setExpanded}>
+      <Card className="ml-2 gap-0 overflow-hidden py-0">
+        <CollapsibleTrigger asChild>
+          <button
+            type="button"
+            className="flex w-full items-center justify-between gap-3 bg-muted/50 px-3 py-2 text-left"
           >
-            <polyline points="9 18 15 12 9 6" />
-          </svg>
-          <span className="tool-call-name">{label}</span>
-          {summary && <span className="tool-call-summary">{summary}</span>}
-        </div>
-        <div className="tool-call-right">
-          <span className="tool-call-index">#{index}</span>
-          <StatusBadge status={status} duration={duration} />
-        </div>
-      </div>
-
-      {expanded && (
-        <div className="tool-call-detail">
-          <div className="tool-detail-section">
-            <div className="tool-detail-label">参数</div>
-            <pre className="tool-detail-code">{formatJSON(args)}</pre>
-          </div>
-          {displayResult && (
-            <div className="tool-detail-section">
-              <div className="tool-detail-label">
-                返回结果
-                {duration != null && <span className="tool-duration">({duration}ms)</span>}
-              </div>
-              <pre className="tool-detail-code">{formatJSON(displayResult)}</pre>
+            <div className="flex min-w-0 items-center gap-2">
+              <ChevronRight
+                className={`h-4 w-4 shrink-0 text-muted-foreground transition-transform ${expanded ? 'rotate-90' : ''}`}
+              />
+              <span className="text-sm font-semibold">{label}</span>
+              {summary && (
+                <span className="truncate text-xs text-muted-foreground">{summary}</span>
+              )}
             </div>
-          )}
-        </div>
-      )}
-    </div>
-  )
-}
 
-function StatusBadge({ status, duration }) {
-  if (status === 'running') {
-    return (
-      <span className="tool-call-status running">
-        <svg className="spin-icon" viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2.5">
-          <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" />
-        </svg>
-        执行中
-      </span>
-    )
-  }
-  if (status === 'success') {
-    return (
-      <span className="tool-call-status success">
-        完成
-        {duration != null && <span className="tool-call-duration">{duration}ms</span>}
-      </span>
-    )
-  }
-  if (status === 'error') {
-    return (
-      <span className="tool-call-status error">
-        失败
-        {duration != null && <span className="tool-call-duration">{duration}ms</span>}
-      </span>
-    )
-  }
-  return null
+            <div className="flex shrink-0 items-center gap-2">
+              <span className="text-xs text-muted-foreground">#{index}</span>
+              <StatusBadge status={status} duration={duration} />
+            </div>
+          </button>
+        </CollapsibleTrigger>
+
+        <CollapsibleContent>
+          <Separator />
+          <div className="space-y-3 p-3">
+            <section className="space-y-1">
+              <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                参数
+              </div>
+              <pre className="max-h-52 overflow-auto rounded-md bg-muted p-2 text-xs leading-relaxed text-muted-foreground">
+                {formatJSON(args)}
+              </pre>
+            </section>
+
+            {displayResult && (
+              <>
+                <Separator />
+                <section className="space-y-1">
+                  <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                    返回结果{duration != null ? `（${duration}ms）` : ''}
+                  </div>
+                  <pre className="max-h-52 overflow-auto rounded-md bg-muted p-2 text-xs leading-relaxed text-muted-foreground">
+                    {formatJSON(displayResult)}
+                  </pre>
+                </section>
+              </>
+            )}
+          </div>
+        </CollapsibleContent>
+      </Card>
+    </Collapsible>
+  )
 }

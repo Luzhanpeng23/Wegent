@@ -1,21 +1,10 @@
-import { useState, useRef, useEffect } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { TooltipProvider } from '@/components/ui/tooltip'
 import { useChromeAgent } from './hooks/useChromeAgent'
 import Header from './components/Header'
 import SettingsPanel from './components/SettingsPanel'
 import ChatArea from './components/ChatArea'
 import InputArea from './components/InputArea'
-
-const THEME_KEY = 'dom-agent-theme'
-const DEFAULT_THEME = 'azure-auto'
-
-// 根据存储的主题值解析出实际应用的 data-theme
-function resolveTheme(stored, prefersDark) {
-  const base = stored.replace('-dark', '').replace('-auto', '')
-  if (stored.endsWith('-auto')) {
-    return prefersDark ? `${base}-dark` : base
-  }
-  return stored // 浅色或深色，直接使用
-}
 
 export default function App() {
   const {
@@ -34,82 +23,63 @@ export default function App() {
   } = useChromeAgent()
 
   const [view, setView] = useState('chat')
-  const [theme, setTheme] = useState(() => {
-    try {
-      return localStorage.getItem(THEME_KEY) || DEFAULT_THEME
-    } catch {
-      return DEFAULT_THEME
-    }
+  const [themeModePreview, setThemeModePreview] = useState(null)
+  const [systemPrefersDark, setSystemPrefersDark] = useState(() => {
+    if (typeof window === 'undefined' || !window.matchMedia) return false
+    return window.matchMedia('(prefers-color-scheme: dark)').matches
   })
-  // 系统明暗偏好状态
-  const [prefersDark, setPrefersDark] = useState(() =>
-    window.matchMedia?.('(prefers-color-scheme: dark)').matches ?? false
-  )
   const chatEndRef = useRef(null)
 
-  // 监听系统明暗偏好变化
+  const themeMode = themeModePreview || config?.themeMode || 'light'
+  const resolvedDark = themeMode === 'dark' || (themeMode === 'system' && systemPrefersDark)
+
   useEffect(() => {
-    const mql = window.matchMedia?.('(prefers-color-scheme: dark)')
-    if (!mql) return
-    const handler = (e) => setPrefersDark(e.matches)
-    mql.addEventListener('change', handler)
-    return () => mql.removeEventListener('change', handler)
+    if (typeof window === 'undefined' || !window.matchMedia) return
+
+    const media = window.matchMedia('(prefers-color-scheme: dark)')
+    const handleChange = (event) => setSystemPrefersDark(event.matches)
+    setSystemPrefersDark(media.matches)
+
+    if (media.addEventListener) {
+      media.addEventListener('change', handleChange)
+      return () => media.removeEventListener('change', handleChange)
+    }
+
+    media.addListener(handleChange)
+    return () => media.removeListener(handleChange)
   }, [])
 
-  // 消息更新时自动滚动到底部
+  useEffect(() => {
+    document.documentElement.classList.toggle('dark', resolvedDark)
+  }, [resolvedDark])
+
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
 
-  useEffect(() => {
-    try {
-      localStorage.setItem(THEME_KEY, theme)
-    } catch {
-      // 忽略不支持 localStorage 的环境
-    }
-  }, [theme])
-
-  // 解析出实际应用的主题
-  const appliedTheme = resolveTheme(theme, prefersDark)
-
-  const handleSend = (input) => {
-    sendMessage(input)
-  }
-
-  const handleClear = () => {
-    clearConversation()
-  }
-
-  const handleSaveSettings = (newConfig) => {
-    saveConfig(newConfig)
-    setView('chat')
-  }
-
-  const handleOpenSettings = () => {
-    setView('settings')
-  }
-
-  const handleBackToChat = () => {
-    setView('chat')
-  }
-
   return (
-    <div className="app" data-theme={appliedTheme}>
-      <div className="app-shell">
+    <TooltipProvider>
+      <div className="flex h-full w-full flex-col overflow-hidden bg-background text-foreground">
         <Header
           view={view}
-          onClear={handleClear}
-          onOpenSettings={handleOpenSettings}
-          onBackToChat={handleBackToChat}
+          onClear={clearConversation}
+          onOpenSettings={() => setView('settings')}
+          onBackToChat={() => setView('chat')}
         />
 
         {view === 'settings' ? (
           <SettingsPanel
             config={config}
-            onSave={handleSaveSettings}
-            onCancel={handleBackToChat}
-            theme={theme}
-            onThemeChange={setTheme}
+            onThemeModeChange={setThemeModePreview}
+            onSave={(newConfig) => {
+              saveConfig(newConfig)
+              setThemeModePreview(null)
+              setView('chat')
+            }}
+            onCancel={() => {
+              setThemeModePreview(null)
+              setView('chat')
+            }}
             skillApi={{
               preview: skillImportPreview,
               commit: skillImportCommit,
@@ -124,16 +94,16 @@ export default function App() {
             <ChatArea
               messages={messages}
               chatEndRef={chatEndRef}
-              onQuickSend={handleSend}
+              onQuickSend={sendMessage}
             />
             <InputArea
-              onSend={handleSend}
+              onSend={sendMessage}
               disabled={isProcessing}
               config={config}
             />
           </>
         )}
       </div>
-    </div>
+    </TooltipProvider>
   )
 }

@@ -12,18 +12,8 @@ import {
 
 // ---- 配置 ----
 const DEFAULT_MULTIMODAL = {
-  enabled: true,
   modelSupportsVision: true,
-  allowUserImageUpload: true,
-  allowToolScreenshotToModel: true,
-  maxImagesPerTurn: 2,
-  maxImageBytes: 800 * 1024,
-  maxTotalImageBytesPerTurn: 1200 * 1024,
-  imageMaxWidth: 1280,
-  imageMaxHeight: 1280,
-  imageFormat: "jpeg",
-  imageQuality: 0.82,
-  screenshotDetail: "low",
+  imageDetail: "auto",
 };
 
 const DEFAULT_SKILL_RUNTIME = {
@@ -52,8 +42,6 @@ const DEFAULT_CONFIG = {
   topP: 1,
   maxTokens: 8192,
   multimodal: { ...DEFAULT_MULTIMODAL },
-  // 旧版可执行技能（兼容保留）
-  skills: [],
   // Claude Code 风格 Skill Packages（SKILL.md）
   skillPackages: [],
   skillRuntime: { ...DEFAULT_SKILL_RUNTIME },
@@ -455,7 +443,6 @@ function mergeConfig(baseConfig = {}) {
       ...DEFAULT_MULTIMODAL,
       ...(baseConfig.multimodal || {}),
     },
-    skills: Array.isArray(baseConfig.skills) ? baseConfig.skills : [],
     skillPackages: normalizeSkillPackages(baseConfig.skillPackages),
     skillRuntime: normalizeSkillRuntime(baseConfig.skillRuntime),
     mcpServers: normalizeMcpServers(baseConfig.mcpServers),
@@ -833,7 +820,7 @@ async function resolveSkillImportSource(inputUrl) {
 
     const slugHint = urlObj.pathname.split("/").filter(Boolean).at(-1) || "";
 
-    // 1) 优先尝试从 skills.sh URL 直接推导 GitHub 具体子目录
+    // 1) 优先尝试从 skills.sh URL 直接推导 GitHub Skill Package 具体子目录
     const seg = urlObj.pathname.split("/").filter(Boolean);
     if (seg.length >= 3) {
       const owner = seg[0];
@@ -850,7 +837,7 @@ async function resolveSkillImportSource(inputUrl) {
     // 2) 从页面里选择最匹配当前 slug 的 GitHub 链接
     const githubUrl = extractGithubLikeUrl(page.text, { preferSegment: slugHint });
     if (!githubUrl) {
-      throw new Error("未在 skills.sh 页面中解析到 GitHub skill 链接");
+      throw new Error("未在 skills.sh 页面中解析到 GitHub Skill Package 链接");
     }
 
     if (githubUrl.includes("raw.githubusercontent.com")) {
@@ -1441,7 +1428,7 @@ async function buildSkillContextMessage(userText, selectedPackages) {
     }
 
     blocks.push([
-      `### Skill ${index + 1}: ${pkg.name}`,
+      `### Skill Package ${index + 1}: ${pkg.name}`,
       desc ? `Description: ${desc}` : "",
       "Instructions:",
       trimmedBody || "(empty)",
@@ -1455,9 +1442,9 @@ async function buildSkillContextMessage(userText, selectedPackages) {
   }
 
   return [
-    "以下是匹配到的技能包指令，请优先遵循这些技能流程来回应用户请求。",
-    "若技能与用户请求无关，请忽略。",
-    "不要执行 skills 中 scripts 目录里的远程脚本；scripts 仅作为参考资源。",
+    "以下是匹配到的 Skill Package 指令，请优先遵循这些流程来回应用户请求。",
+    "若 Skill Package 与用户请求无关，请忽略。",
+    "不要执行 Skill Package 中 scripts 目录里的远程脚本；scripts 仅作为参考资源。",
     "",
     ...blocks,
   ].join("\n\n");
@@ -1516,21 +1503,13 @@ function getMultimodalConfig() {
   };
 
   return {
-    ...mm,
-    maxImagesPerTurn: Math.floor(clampNumber(mm.maxImagesPerTurn, DEFAULT_MULTIMODAL.maxImagesPerTurn, 1, 10)),
-    maxImageBytes: Math.floor(clampNumber(mm.maxImageBytes, DEFAULT_MULTIMODAL.maxImageBytes, 64 * 1024, 10 * 1024 * 1024)),
-    maxTotalImageBytesPerTurn: Math.floor(
-      clampNumber(mm.maxTotalImageBytesPerTurn, DEFAULT_MULTIMODAL.maxTotalImageBytesPerTurn, 128 * 1024, 20 * 1024 * 1024)
-    ),
-    imageMaxWidth: Math.floor(clampNumber(mm.imageMaxWidth, DEFAULT_MULTIMODAL.imageMaxWidth, 256, 4096)),
-    imageMaxHeight: Math.floor(clampNumber(mm.imageMaxHeight, DEFAULT_MULTIMODAL.imageMaxHeight, 256, 4096)),
-    imageQuality: clampNumber(mm.imageQuality, DEFAULT_MULTIMODAL.imageQuality, 0.2, 1),
-    screenshotDetail: mm.screenshotDetail === "auto" ? "auto" : "low",
+    modelSupportsVision: mm.modelSupportsVision !== false,
+    imageDetail: ["auto", "low", "high"].includes(mm.imageDetail) ? mm.imageDetail : "auto",
   };
 }
 
 function isVisionEnabled(multimodal) {
-  return !!(multimodal.enabled && multimodal.modelSupportsVision);
+  return !!multimodal.modelSupportsVision;
 }
 
 function normalizeAttachment(raw) {
@@ -1556,13 +1535,12 @@ function normalizeAttachment(raw) {
   };
 }
 
-function sanitizeAttachments(rawAttachments, multimodal) {
+function sanitizeAttachments(rawAttachments) {
   if (!Array.isArray(rawAttachments) || rawAttachments.length === 0) return [];
 
   const accepted = [];
-  const maxCount = multimodal.maxImagesPerTurn;
-  const maxImageBytes = multimodal.maxImageBytes;
-  const maxTotalBytes = multimodal.maxTotalImageBytesPerTurn;
+  const maxCount = 500;
+  const maxTotalBytes = 50 * 1024 * 1024;
   let totalBytes = 0;
 
   for (const raw of rawAttachments) {
@@ -1570,7 +1548,6 @@ function sanitizeAttachments(rawAttachments, multimodal) {
 
     const attachment = normalizeAttachment(raw);
     if (!attachment) continue;
-    if (attachment.sizeBytes > maxImageBytes) continue;
     if (totalBytes + attachment.sizeBytes > maxTotalBytes) continue;
 
     accepted.push(attachment);
@@ -1597,7 +1574,7 @@ function buildUserMessage(text, attachments, multimodal) {
       type: "image_url",
       image_url: {
         url: attachment.dataUrl,
-        detail: multimodal.screenshotDetail,
+        detail: multimodal.imageDetail,
       },
     });
   }
@@ -1672,7 +1649,7 @@ chrome.runtime.onConnect.addListener((port) => {
 
 // ---- API 调用 ----
 async function callAPI(messages, { stream = false, onDelta, onToolCalls, skillContextMessage = "" } = {}) {
-  // 合并内置工具 + Skills + MCP 动态工具
+  // 合并内置工具 + Skill Package 上下文 + MCP 动态工具
   const dynamicTools = buildDynamicTools();
   const allTools = [...TOOLS, ...dynamicTools.map(t => ({ type: t.type, function: t.function }))];
   const requestMessages = withSkillContextMessages(messages, skillContextMessage);
@@ -2013,25 +1990,9 @@ async function refreshMcpTools(serversOverride = null) {
   }
 }
 
-// 将 MCP + Skills 远程工具转换成 OpenAI function tool 格式
+// 将 MCP 远程工具转换成 OpenAI function tool 格式
 function buildDynamicTools() {
   const extraTools = [];
-
-  // Skills → tools
-  for (const skill of config.skills || []) {
-    if (!skill.enabled || !skill.name) continue;
-    const params = skill.parameters || { type: "object", properties: {} };
-    extraTools.push({
-      type: "function",
-      function: {
-        name: `skill_${skill.name}`,
-        description: skill.description || skill.name,
-        parameters: params,
-      },
-      _source: "skill",
-      _skillId: skill.id,
-    });
-  }
 
   // MCP → tools
   mcpToolNameMap.clear();
@@ -2059,74 +2020,9 @@ function buildDynamicTools() {
   return extraTools;
 }
 
-// ============================================================
-// Skills 技能执行器
-// 支持 javascript（页面执行）和 http（HTTP 请求）两种类型
-// ============================================================
-async function executeSkill(tabId, skill, args) {
-  try {
-    switch (skill.type) {
-      case "javascript": {
-        // 在页面上下文中执行预设 JS 代码
-        let code = skill.config?.code || "";
-        // 将参数注入为 __args 变量
-        code = `(function(__args){ ${code} })(${JSON.stringify(args)})`;
-        const results = await chrome.tabs.sendMessage(tabId, {
-          type: "EXECUTE_TOOL",
-          tool: "evaluate_js",
-          args: { code },
-        });
-        return results;
-      }
-
-      case "http": {
-        const cfg = skill.config || {};
-        let url = cfg.url || "";
-        let body = cfg.bodyTemplate || "";
-        let headers = { ...(cfg.headers || {}) };
-
-        // 简单模板替换：{{key}} → args.key
-        const replaceTpl = (str) =>
-          str.replace(/\{\{(\w+)\}\}/g, (_, k) => (args[k] !== undefined ? String(args[k]) : ""));
-        url = replaceTpl(url);
-        body = replaceTpl(body);
-        for (const [hk, hv] of Object.entries(headers)) {
-          headers[hk] = replaceTpl(hv);
-        }
-
-        const method = (cfg.method || "GET").toUpperCase();
-        const fetchOpts = { method, headers };
-        if (method !== "GET" && method !== "HEAD" && body) {
-          fetchOpts.body = body;
-          if (!headers["Content-Type"]) headers["Content-Type"] = "application/json";
-        }
-
-        const res = await fetch(url, fetchOpts);
-        const text = await res.text();
-        let result;
-        try { result = JSON.parse(text); } catch { result = text; }
-        return { success: res.ok, status: res.status, data: result };
-      }
-
-      default:
-        return { success: false, error: `未知技能类型: ${skill.type}` };
-    }
-  } catch (e) {
-    return { success: false, error: e.message };
-  }
-}
-
 // 统一工具执行路由
 async function executeTool(tabId, name, args) {
   try {
-    // 路由 Skill 调用
-    if (name.startsWith("skill_")) {
-      const skillName = name.slice(6);
-      const skill = (config.skills || []).find(s => s.name === skillName && s.enabled);
-      if (!skill) return { success: false, error: `未找到技能: ${skillName}` };
-      return await executeSkill(tabId, skill, args);
-    }
-
     // 路由 MCP 调用（通过查找表获取 serverId / toolName，避免下划线歧义）
     if (name.startsWith("mcp_")) {
       const mapping = mcpToolNameMap.get(name);
@@ -2204,8 +2100,8 @@ async function runAgent(tabId, rawUserInput, sendUpdate) {
   const userInput = normalizeUserInput(rawUserInput);
 
   let attachments = [];
-  if (multimodal.enabled && multimodal.allowUserImageUpload) {
-    attachments = sanitizeAttachments(userInput.attachments, multimodal);
+  if (multimodal.modelSupportsVision) {
+    attachments = sanitizeAttachments(userInput.attachments);
   }
 
   const visionEnabled = isVisionEnabled(multimodal);
@@ -2221,7 +2117,7 @@ async function runAgent(tabId, rawUserInput, sendUpdate) {
   if (!visionEnabled && !userInput.text.trim() && attachments.length > 0) {
     sendUpdate({
       type: "error",
-      message: "当前模型未启用视觉能力，请输入文本或在设置中开启视觉支持。",
+      message: "当前模型未启用视觉能力，请输入文本或在设置中开启 Vision 支持。",
     });
     return;
   }
@@ -2314,7 +2210,7 @@ async function runAgent(tabId, rawUserInput, sendUpdate) {
         let screenshotFollowupMessage = null;
 
         if (funcName === "take_screenshot" && result.screenshot) {
-          if (isVisionEnabled(multimodal) && multimodal.allowToolScreenshotToModel) {
+          if (isVisionEnabled(multimodal)) {
             const screenshotAttachment = sanitizeAttachments(
               [
                 {

@@ -9,7 +9,7 @@ const THEME_OPTIONS = [
   { value: 'slate', label: '石墨灰', color: '#3f5aa8' },
 ]
 
-export default function SettingsPanel({ config, onSave, onCancel, theme, onThemeChange }) {
+export default function SettingsPanel({ config, onSave, onCancel, theme, onThemeChange, skillApi }) {
   const [form, setForm] = useState({
     apiBase: '',
     apiKey: '',
@@ -20,6 +20,7 @@ export default function SettingsPanel({ config, onSave, onCancel, theme, onTheme
     topP: 1,
     systemPrompt: '',
     skills: [],
+    skillPackages: [],
     mcpServers: [],
     multimodal: {
       enabled: true,
@@ -50,6 +51,7 @@ export default function SettingsPanel({ config, onSave, onCancel, theme, onTheme
         topP: config.topP ?? 1,
         systemPrompt: config.systemPrompt || '',
         skills: Array.isArray(config.skills) ? config.skills : [],
+        skillPackages: Array.isArray(config.skillPackages) ? config.skillPackages : [],
         mcpServers: Array.isArray(config.mcpServers) ? config.mcpServers : [],
         multimodal: {
           enabled: config.multimodal?.enabled ?? true,
@@ -91,6 +93,7 @@ export default function SettingsPanel({ config, onSave, onCancel, theme, onTheme
       temperature: parseFloat(form.temperature) ?? 0.7,
       topP: parseFloat(form.topP) ?? 1,
       skills: form.skills,
+      skillPackages: form.skillPackages,
       mcpServers: form.mcpServers,
       multimodal: {
         ...form.multimodal,
@@ -427,7 +430,13 @@ export default function SettingsPanel({ config, onSave, onCancel, theme, onTheme
 
         <SkillsManager
           skills={form.skills}
-          onChange={(skills) => setForm(prev => ({ ...prev, skills }))}
+          skillPackages={form.skillPackages}
+          skillApi={skillApi}
+          onChange={(payload) => setForm(prev => ({
+            ...prev,
+            skills: Array.isArray(payload?.skills) ? payload.skills : prev.skills,
+            skillPackages: Array.isArray(payload?.skillPackages) ? payload.skillPackages : prev.skillPackages,
+          }))}
         />
 
         <McpManager

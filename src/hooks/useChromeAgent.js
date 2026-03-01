@@ -5,6 +5,7 @@ const isChromeExtension = typeof chrome !== 'undefined' && !!chrome.runtime?.id
 
 /** 非扩展环境下的默认配置（用于开发预览） */
 const DEV_CONFIG = {
+  schemaVersion: 2,
   apiBase: 'https://api.openai.com/v1',
   apiKey: '',
   model: 'gpt-4o',
@@ -26,7 +27,16 @@ const DEV_CONFIG = {
     imageQuality: 0.82,
     screenshotDetail: 'low',
   },
+  // 旧版可执行技能（兼容保留）
   skills: [],
+  // Claude Code 风格 Skill Packages
+  skillPackages: [],
+  skillRuntime: {
+    enabled: true,
+    maxPackages: 20,
+    maxSkillBytes: 220 * 1024,
+    maxResourcesPerType: 50,
+  },
   mcpServers: [],
   systemPrompt: '',
 }
@@ -257,8 +267,55 @@ export function useChromeAgent() {
         ...((newConfig && newConfig.multimodal) || {}),
       },
       skills: Array.isArray(newConfig?.skills) ? newConfig.skills : (prev?.skills || []),
+      skillPackages: Array.isArray(newConfig?.skillPackages) ? newConfig.skillPackages : (prev?.skillPackages || []),
+      skillRuntime: {
+        ...((prev && prev.skillRuntime) || DEV_CONFIG.skillRuntime),
+        ...((newConfig && newConfig.skillRuntime) || {}),
+      },
       mcpServers: Array.isArray(newConfig?.mcpServers) ? newConfig.mcpServers : (prev?.mcpServers || []),
     }))
+  }, [])
+
+  const skillImportPreview = useCallback(async (sourceUrl) => {
+    if (!isChromeExtension) {
+      return { ok: false, error: '仅在 Chrome 扩展环境可用' }
+    }
+    return chrome.runtime.sendMessage({ type: 'SKILL_IMPORT_PREVIEW', sourceUrl })
+  }, [])
+
+  const skillImportCommit = useCallback(async (preview) => {
+    if (!isChromeExtension) {
+      return { ok: false, error: '仅在 Chrome 扩展环境可用' }
+    }
+    return chrome.runtime.sendMessage({ type: 'SKILL_IMPORT_COMMIT', preview })
+  }, [])
+
+  const listSkillPackages = useCallback(async () => {
+    if (!isChromeExtension) {
+      return { ok: true, packages: config?.skillPackages || [] }
+    }
+    return chrome.runtime.sendMessage({ type: 'SKILL_PACKAGE_LIST' })
+  }, [config?.skillPackages])
+
+  const toggleSkillPackage = useCallback(async (packageId, enabled) => {
+    if (!isChromeExtension) {
+      return { ok: false, error: '仅在 Chrome 扩展环境可用' }
+    }
+    return chrome.runtime.sendMessage({ type: 'SKILL_PACKAGE_TOGGLE', packageId, enabled })
+  }, [])
+
+  const removeSkillPackage = useCallback(async (packageId) => {
+    if (!isChromeExtension) {
+      return { ok: false, error: '仅在 Chrome 扩展环境可用' }
+    }
+    return chrome.runtime.sendMessage({ type: 'SKILL_PACKAGE_REMOVE', packageId })
+  }, [])
+
+  const refreshSkillPackage = useCallback(async (packageId) => {
+    if (!isChromeExtension) {
+      return { ok: false, error: '仅在 Chrome 扩展环境可用' }
+    }
+    return chrome.runtime.sendMessage({ type: 'SKILL_PACKAGE_REFRESH', packageId })
   }, [])
 
   return {
@@ -268,5 +325,11 @@ export function useChromeAgent() {
     sendMessage,
     clearConversation,
     saveConfig,
+    skillImportPreview,
+    skillImportCommit,
+    listSkillPackages,
+    toggleSkillPackage,
+    removeSkillPackage,
+    refreshSkillPackage,
   }
 }

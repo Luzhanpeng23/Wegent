@@ -1,3 +1,10 @@
+import {
+  parseSkillMarkdown,
+  inferSkillName,
+  inferSkillDescription,
+  sanitizeSkillPackageName,
+} from "./src/utils/skillParser.js";
+
 // ============================================================
 // DOM Agent - Background Service Worker
 // 负责与 OpenAI 兼容 API 通信，协调 content script 执行操作
@@ -19,7 +26,24 @@ const DEFAULT_MULTIMODAL = {
   screenshotDetail: "low",
 };
 
+const DEFAULT_SKILL_RUNTIME = {
+  enabled: true,
+  maxPackages: 20,
+  maxSkillBytes: 220 * 1024,
+  maxResourcesPerType: 50,
+  maxTriggeredSkillsPerTurn: 2,
+  maxSkillBodyChars: 6000,
+  maxReferencesPerSkill: 2,
+  maxReferenceFetchBytes: 180 * 1024,
+  maxReferenceSnippetChars: 1200,
+  maxTotalReferenceChars: 2400,
+  maxExamplesPerSkill: 1,
+  maxExampleSnippetChars: 900,
+  maxTotalExampleChars: 1500,
+};
+
 const DEFAULT_CONFIG = {
+  schemaVersion: 2,
   apiBase: "https://api.openai.com/v1",
   apiKey: "",
   model: "gpt-4o",
@@ -28,8 +52,11 @@ const DEFAULT_CONFIG = {
   topP: 1,
   maxTokens: 8192,
   multimodal: { ...DEFAULT_MULTIMODAL },
-  // 自定义技能列表
+  // 旧版可执行技能（兼容保留）
   skills: [],
+  // Claude Code 风格 Skill Packages（SKILL.md）
+  skillPackages: [],
+  skillRuntime: { ...DEFAULT_SKILL_RUNTIME },
   // MCP 远程服务器列表
   mcpServers: [],
   systemPrompt: `你是一个浏览器操作助手。用户会用自然语言描述他们想在当前网页上执行的操作，你需要通过调用工具来完成这些操作。
@@ -273,6 +300,7 @@ let config = {
   multimodal: { ...DEFAULT_MULTIMODAL },
 };
 let conversations = new Map(); // tabId -> messages[]
+const skillReferenceCache = new Map(); // key -> { text, expiresAt }
 
 function normalizeMcpServer(server, fallbackId = "") {
   if (!server || typeof server !== "object") return null;
@@ -323,15 +351,113 @@ function normalizeMcpServers(raw) {
   return [];
 }
 
+function normalizeSkillRuntime(raw) {
+  const merged = {
+    ...DEFAULT_SKILL_RUNTIME,
+    ...(raw && typeof raw === "object" ? raw : {}),
+  };
+
+  return {
+    ...merged,
+    enabled: merged.enabled !== false,
+    maxPackages: Math.floor(clampNumber(merged.maxPackages, DEFAULT_SKILL_RUNTIME.maxPackages, 1, 200)),
+    maxSkillBytes: Math.floor(clampNumber(merged.maxSkillBytes, DEFAULT_SKILL_RUNTIME.maxSkillBytes, 8 * 1024, 2 * 1024 * 1024)),
+    maxResourcesPerType: Math.floor(clampNumber(merged.maxResourcesPerType, DEFAULT_SKILL_RUNTIME.maxResourcesPerType, 1, 200)),
+    maxTriggeredSkillsPerTurn: Math.floor(clampNumber(merged.maxTriggeredSkillsPerTurn, DEFAULT_SKILL_RUNTIME.maxTriggeredSkillsPerTurn, 1, 4)),
+    maxSkillBodyChars: Math.floor(clampNumber(merged.maxSkillBodyChars, DEFAULT_SKILL_RUNTIME.maxSkillBodyChars, 800, 20000)),
+    maxReferencesPerSkill: Math.floor(clampNumber(merged.maxReferencesPerSkill, DEFAULT_SKILL_RUNTIME.maxReferencesPerSkill, 0, 5)),
+    maxReferenceFetchBytes: Math.floor(clampNumber(merged.maxReferenceFetchBytes, DEFAULT_SKILL_RUNTIME.maxReferenceFetchBytes, 8 * 1024, 2 * 1024 * 1024)),
+    maxReferenceSnippetChars: Math.floor(clampNumber(merged.maxReferenceSnippetChars, DEFAULT_SKILL_RUNTIME.maxReferenceSnippetChars, 200, 8000)),
+    maxTotalReferenceChars: Math.floor(clampNumber(merged.maxTotalReferenceChars, DEFAULT_SKILL_RUNTIME.maxTotalReferenceChars, 0, 12000)),
+    maxExamplesPerSkill: Math.floor(clampNumber(merged.maxExamplesPerSkill, DEFAULT_SKILL_RUNTIME.maxExamplesPerSkill, 0, 3)),
+    maxExampleSnippetChars: Math.floor(clampNumber(merged.maxExampleSnippetChars, DEFAULT_SKILL_RUNTIME.maxExampleSnippetChars, 200, 4000)),
+    maxTotalExampleChars: Math.floor(clampNumber(merged.maxTotalExampleChars, DEFAULT_SKILL_RUNTIME.maxTotalExampleChars, 0, 6000)),
+  };
+}
+
+function normalizeSkillPackages(raw) {
+  if (!Array.isArray(raw)) return [];
+
+  const now = new Date().toISOString();
+  const normalized = [];
+
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const name = String(item.name || "").trim();
+    if (!name) continue;
+
+    const safeName = sanitizeSkillPackageName(name) || "skill_package";
+    const id = String(item.id || `sp_${safeName}_${Date.now().toString(36)}`)
+      .trim()
+      .replace(/\s+/g, "_");
+
+    const skill = item.skill && typeof item.skill === "object" ? item.skill : {};
+    const body = typeof skill.body === "string"
+      ? skill.body
+      : (typeof item.body === "string" ? item.body : "");
+    const rawText = typeof skill.raw === "string"
+      ? skill.raw
+      : (typeof item.raw === "string" ? item.raw : body);
+    const frontmatter = skill.frontmatter && typeof skill.frontmatter === "object"
+      ? skill.frontmatter
+      : (item.frontmatter && typeof item.frontmatter === "object" ? item.frontmatter : {});
+
+    const resources = item.resources && typeof item.resources === "object" ? item.resources : {};
+    const asPathList = (list) => {
+      if (!Array.isArray(list)) return [];
+      const output = [];
+      const seen = new Set();
+      for (const value of list) {
+        const normalizedPath = normalizeReferencePath(value);
+        if (!normalizedPath || seen.has(normalizedPath)) continue;
+        seen.add(normalizedPath);
+        output.push(normalizedPath);
+        if (output.length >= 200) break;
+      }
+      return output;
+    };
+
+    normalized.push({
+      id,
+      name,
+      description: typeof item.description === "string" ? item.description : "",
+      enabled: item.enabled !== false,
+      sourceUrl: typeof item.sourceUrl === "string" ? item.sourceUrl : "",
+      skillUrl: typeof item.skillUrl === "string" ? item.skillUrl : "",
+      homepageUrl: typeof item.homepageUrl === "string" ? item.homepageUrl : "",
+      importedAt: typeof item.importedAt === "string" ? item.importedAt : now,
+      updatedAt: typeof item.updatedAt === "string" ? item.updatedAt : now,
+      repository: item.repository && typeof item.repository === "object" ? item.repository : null,
+      skillPath: typeof item.skillPath === "string" ? item.skillPath : "SKILL.md",
+      resources: {
+        references: asPathList(resources.references),
+        examples: asPathList(resources.examples),
+        scripts: asPathList(resources.scripts),
+      },
+      skill: {
+        frontmatter,
+        body,
+        raw: rawText,
+        bytes: Number(skill.bytes) > 0 ? Number(skill.bytes) : new TextEncoder().encode(rawText).length,
+      },
+    });
+  }
+
+  return normalized;
+}
+
 function mergeConfig(baseConfig = {}) {
   return {
     ...DEFAULT_CONFIG,
     ...baseConfig,
+    schemaVersion: Number(baseConfig.schemaVersion) || DEFAULT_CONFIG.schemaVersion,
     multimodal: {
       ...DEFAULT_MULTIMODAL,
       ...(baseConfig.multimodal || {}),
     },
     skills: Array.isArray(baseConfig.skills) ? baseConfig.skills : [],
+    skillPackages: normalizeSkillPackages(baseConfig.skillPackages),
+    skillRuntime: normalizeSkillRuntime(baseConfig.skillRuntime),
     mcpServers: normalizeMcpServers(baseConfig.mcpServers),
   };
 }
@@ -345,6 +471,1015 @@ function getErrorMessage(error) {
   } catch {
     return String(error);
   }
+}
+
+const SKILL_IMPORT_TIMEOUT_MS = 15000;
+const SKILL_IMPORT_MAX_FETCH_BYTES = 1024 * 1024;
+
+function escapeRegExp(text = "") {
+  return String(text).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function cleanForMatch(text = "") {
+  return String(text)
+    .toLowerCase()
+    .replace(/[\s_\-:/]+/g, "")
+    .trim();
+}
+
+function normalizeReferencePath(path) {
+  return String(path || "")
+    .replace(/\\/g, "/")
+    .replace(/^\/+/, "")
+    .trim();
+}
+
+function splitTopKeywords(text = "", max = 10) {
+  const raw = String(text || "").toLowerCase();
+  const words = raw.match(/[a-z0-9_\u4e00-\u9fa5]+/g) || [];
+  const stop = new Set([
+    "this", "that", "with", "from", "have", "will", "when", "where", "what", "which", "into", "then", "than",
+    "以及", "或者", "如果", "可以", "进行", "用于", "通过", "需要", "用户", "当前", "这个", "那个", "我们",
+  ]);
+  const score = new Map();
+  for (const w of words) {
+    if (w.length < 2) continue;
+    if (stop.has(w)) continue;
+    score.set(w, (score.get(w) || 0) + 1);
+  }
+  return [...score.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, max)
+    .map(([w]) => w);
+}
+
+function tokenizeResourcePath(path = "") {
+  return String(path)
+    .toLowerCase()
+    .split(/[^a-z0-9\u4e00-\u9fa5]+/)
+    .filter(Boolean);
+}
+
+function normalizeHttpUrl(rawUrl) {
+  const value = String(rawUrl || "").trim();
+  if (!value) throw new Error("请输入技能 URL");
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error("技能 URL 无效");
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error("仅支持 http/https URL");
+  }
+  return parsed.toString();
+}
+
+function encodeGitHubPath(path) {
+  return String(path || "")
+    .split("/")
+    .filter(Boolean)
+    .map(seg => encodeURIComponent(seg))
+    .join("/");
+}
+
+function parseGitHubRepo(urlString) {
+  let u;
+  try {
+    u = new URL(urlString);
+  } catch {
+    return null;
+  }
+  if (u.hostname !== "github.com") return null;
+
+  const parts = u.pathname.split("/").filter(Boolean);
+  if (parts.length < 2) return null;
+
+  return {
+    owner: parts[0],
+    repo: parts[1].replace(/\.git$/, ""),
+    parts,
+  };
+}
+
+async function fetchTextWithLimit(url, { accept = "text/plain, text/markdown, text/html, application/json", timeoutMs = SKILL_IMPORT_TIMEOUT_MS, maxBytes = SKILL_IMPORT_MAX_FETCH_BYTES } = {}) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const res = await fetch(url, {
+      method: "GET",
+      headers: {
+        "Accept": accept,
+      },
+      signal: controller.signal,
+    });
+
+    if (!res.ok) {
+      throw new Error(`请求失败 (${res.status}): ${res.statusText || "unknown"}`);
+    }
+
+    const text = await res.text();
+    const bytes = new TextEncoder().encode(text).length;
+    if (bytes > maxBytes) {
+      throw new Error(`远程文件过大（${bytes} bytes）`);
+    }
+
+    return {
+      text,
+      bytes,
+      contentType: (res.headers.get("content-type") || "").toLowerCase(),
+      finalUrl: res.url || url,
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function extractGithubLikeUrl(text, { preferSegment = "" } = {}) {
+  const raw = String(text || "");
+  const target = String(preferSegment || "").trim().toLowerCase();
+
+  const rawMatches = raw.match(/https:\/\/raw\.githubusercontent\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_./-]*SKILL\.md/ig) || [];
+  const repoMatches = raw.match(/https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_./-]*)?/ig) || [];
+
+  const candidates = [...new Set([...rawMatches, ...repoMatches])];
+  if (candidates.length === 0) return "";
+
+  const scoreUrl = (url) => {
+    const lower = String(url || "").toLowerCase();
+    let score = 0;
+
+    if (lower.includes("raw.githubusercontent.com") && lower.includes("skill.md")) score += 10;
+    if (lower.includes("/blob/") || lower.includes("/tree/")) score += 6;
+    if (lower.includes("skill.md")) score += 4;
+
+    if (target) {
+      if (lower.includes(`/${target}/`)) score += 20;
+      if (lower.endsWith(`/${target}`)) score += 12;
+      if (lower.includes(target)) score += 6;
+    }
+
+    return score;
+  };
+
+  candidates.sort((a, b) => {
+    const diff = scoreUrl(b) - scoreUrl(a);
+    if (diff !== 0) return diff;
+    return a.length - b.length;
+  });
+
+  return candidates[0] || "";
+}
+
+async function fetchGitHubDefaultBranch(owner, repo) {
+  const api = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
+  const { text } = await fetchTextWithLimit(api, { accept: "application/vnd.github+json" });
+  let json;
+  try {
+    json = JSON.parse(text);
+  } catch {
+    throw new Error("无法读取 GitHub 仓库信息");
+  }
+  return json?.default_branch || "main";
+}
+
+function buildResourceIndex(skillPath, allPaths = [], maxPerType = DEFAULT_SKILL_RUNTIME.maxResourcesPerType) {
+  const safeSkillPath = String(skillPath || "SKILL.md");
+  const lastSlash = safeSkillPath.lastIndexOf("/");
+  const baseDir = lastSlash >= 0 ? `${safeSkillPath.slice(0, lastSlash + 1)}` : "";
+
+  const pick = (folderName) => {
+    const prefix = `${baseDir}${folderName}/`;
+    return allPaths
+      .filter(p => typeof p === "string" && p.startsWith(prefix) && !p.endsWith("/"))
+      .slice(0, maxPerType);
+  };
+
+  return {
+    references: pick("references"),
+    examples: pick("examples"),
+    scripts: pick("scripts"),
+  };
+}
+
+async function resolveGitHubSkillSource(urlString) {
+  const parsed = parseGitHubRepo(urlString);
+  if (!parsed) throw new Error("GitHub 地址格式无效");
+
+  const { owner, repo, parts } = parsed;
+  let ref = "";
+  let explicitPath = "";
+
+  if (parts[2] === "blob" || parts[2] === "tree") {
+    ref = parts[3] || "";
+    explicitPath = parts.slice(4).join("/");
+  }
+
+  if (!ref) {
+    ref = await fetchGitHubDefaultBranch(owner, repo);
+  }
+
+  let allRepoPaths = [];
+  try {
+    const treeApi = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/trees/${encodeURIComponent(ref)}?recursive=1`;
+    const { text } = await fetchTextWithLimit(treeApi, { accept: "application/vnd.github+json" });
+    const treeJson = JSON.parse(text);
+    allRepoPaths = Array.isArray(treeJson?.tree)
+      ? treeJson.tree
+          .filter(item => item?.type === "blob" && typeof item.path === "string")
+          .map(item => item.path)
+      : [];
+  } catch {
+    allRepoPaths = [];
+  }
+
+  let skillPath = "";
+
+  if (explicitPath && /(^|\/)SKILL\.md$/i.test(explicitPath)) {
+    skillPath = explicitPath;
+  } else if (explicitPath && allRepoPaths.length > 0) {
+    const normalizedPath = explicitPath.replace(/^\/+|\/+$/g, "");
+    const normalizedLower = normalizedPath.toLowerCase();
+    const skillCandidates = allRepoPaths.filter(p => /(^|\/)SKILL\.md$/i.test(p));
+
+    const preferredPrefixes = [
+      normalizedPath,
+      `skills/${normalizedPath}`,
+    ].filter(Boolean);
+
+    const scored = skillCandidates
+      .map((path) => {
+        const lower = path.toLowerCase();
+        let score = 0;
+
+        for (const prefix of preferredPrefixes) {
+          const lowerPrefix = prefix.toLowerCase();
+          if (lower === `${lowerPrefix}/skill.md`) score = Math.max(score, 120);
+          else if (lower.startsWith(`${lowerPrefix}/`)) score = Math.max(score, 100);
+        }
+
+        if (normalizedLower && lower.includes(`/${normalizedLower}/`)) {
+          score = Math.max(score, 80);
+        }
+
+        if (normalizedLower && lower.endsWith(`/${normalizedLower}/skill.md`)) {
+          score = Math.max(score, 110);
+        }
+
+        return { path, score };
+      })
+      .filter(item => item.score > 0)
+      .sort((a, b) => {
+        const diff = b.score - a.score;
+        if (diff !== 0) return diff;
+        return a.path.length - b.path.length;
+      });
+
+    if (scored.length > 0) {
+      skillPath = scored[0].path;
+    }
+  }
+
+  if (!skillPath && allRepoPaths.length > 0) {
+    const candidates = allRepoPaths.filter(p => /(^|\/)SKILL\.md$/i.test(p));
+    candidates.sort((a, b) => a.length - b.length);
+    skillPath = candidates[0] || "";
+  }
+
+  if (!skillPath) {
+    skillPath = "SKILL.md";
+  }
+
+  const rawUrl = `https://raw.githubusercontent.com/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/${encodeURIComponent(ref)}/${encodeGitHubPath(skillPath)}`;
+  const markdown = await fetchTextWithLimit(rawUrl, { accept: "text/plain, text/markdown" });
+
+  return {
+    sourceUrl: urlString,
+    skillUrl: markdown.finalUrl,
+    markdownText: markdown.text,
+    markdownBytes: markdown.bytes,
+    repository: {
+      host: "github",
+      owner,
+      repo,
+      ref,
+    },
+    skillPath,
+    resourceIndex: buildResourceIndex(skillPath, allRepoPaths),
+  };
+}
+
+async function resolveRawGithubSkillSource(urlString) {
+  const u = new URL(urlString);
+  const parts = u.pathname.split("/").filter(Boolean);
+  if (parts.length < 4) {
+    throw new Error("raw.githubusercontent.com 地址无效");
+  }
+
+  const owner = parts[0];
+  const repo = parts[1];
+  const ref = parts[2];
+  const skillPath = parts.slice(3).join("/");
+
+  if (!/(^|\/)SKILL\.md$/i.test(skillPath)) {
+    throw new Error("请提供指向 SKILL.md 的 raw.githubusercontent.com 地址");
+  }
+
+  const markdown = await fetchTextWithLimit(urlString, { accept: "text/plain, text/markdown" });
+
+  return {
+    sourceUrl: urlString,
+    skillUrl: markdown.finalUrl,
+    markdownText: markdown.text,
+    markdownBytes: markdown.bytes,
+    repository: {
+      host: "github",
+      owner,
+      repo,
+      ref,
+    },
+    skillPath,
+    resourceIndex: buildResourceIndex(skillPath, []),
+  };
+}
+
+async function resolveSkillImportSource(inputUrl) {
+  const normalized = normalizeHttpUrl(inputUrl);
+  const urlObj = new URL(normalized);
+
+  if (urlObj.hostname === "raw.githubusercontent.com") {
+    return resolveRawGithubSkillSource(normalized);
+  }
+
+  if (urlObj.hostname === "github.com") {
+    return resolveGitHubSkillSource(normalized);
+  }
+
+  if (urlObj.hostname.endsWith("skills.sh")) {
+    const page = await fetchTextWithLimit(normalized, { accept: "text/html, text/plain" });
+
+    if (/(^|\/)SKILL\.md$/i.test(urlObj.pathname) || page.contentType.includes("markdown") || page.contentType.includes("text/plain")) {
+      return {
+        sourceUrl: normalized,
+        skillUrl: page.finalUrl,
+        markdownText: page.text,
+        markdownBytes: page.bytes,
+        repository: null,
+        skillPath: "SKILL.md",
+        resourceIndex: { references: [], examples: [], scripts: [] },
+      };
+    }
+
+    const slugHint = urlObj.pathname.split("/").filter(Boolean).at(-1) || "";
+
+    // 1) 优先尝试从 skills.sh URL 直接推导 GitHub 具体子目录
+    const seg = urlObj.pathname.split("/").filter(Boolean);
+    if (seg.length >= 3) {
+      const owner = seg[0];
+      const repo = seg[1];
+      const maybeSkill = seg.slice(2).join("/");
+      const preferredRepoUrl = `https://github.com/${owner}/${repo}/tree/main/${maybeSkill}`;
+      try {
+        return await resolveGitHubSkillSource(preferredRepoUrl);
+      } catch {
+        // 继续降级策略
+      }
+    }
+
+    // 2) 从页面里选择最匹配当前 slug 的 GitHub 链接
+    const githubUrl = extractGithubLikeUrl(page.text, { preferSegment: slugHint });
+    if (!githubUrl) {
+      throw new Error("未在 skills.sh 页面中解析到 GitHub skill 链接");
+    }
+
+    if (githubUrl.includes("raw.githubusercontent.com")) {
+      return resolveRawGithubSkillSource(githubUrl);
+    }
+
+    // 3) 若拿到的是 repo 根地址，且 URL 含 skill slug，则再尝试拼 tree 路径
+    const parsedGh = parseGitHubRepo(githubUrl);
+    if (parsedGh && slugHint && parsedGh.parts.length <= 2) {
+      const fallbackTree = `https://github.com/${parsedGh.owner}/${parsedGh.repo}/tree/main/${slugHint}`;
+      try {
+        return await resolveGitHubSkillSource(fallbackTree);
+      } catch {
+        // 忽略，回退到默认 repo 解析
+      }
+    }
+
+    return resolveGitHubSkillSource(githubUrl);
+  }
+
+  if (/(^|\/)SKILL\.md$/i.test(urlObj.pathname) || urlObj.pathname.toLowerCase().endsWith(".md")) {
+    const markdown = await fetchTextWithLimit(normalized, { accept: "text/plain, text/markdown" });
+    return {
+      sourceUrl: normalized,
+      skillUrl: markdown.finalUrl,
+      markdownText: markdown.text,
+      markdownBytes: markdown.bytes,
+      repository: null,
+      skillPath: "SKILL.md",
+      resourceIndex: { references: [], examples: [], scripts: [] },
+    };
+  }
+
+  throw new Error("暂不支持该 URL，请提供 skills.sh 页面、GitHub 仓库地址或 SKILL.md 直链");
+}
+
+function computeResourceDiff(previousResources, nextResources) {
+  const prev = {
+    references: Array.isArray(previousResources?.references) ? previousResources.references : [],
+    examples: Array.isArray(previousResources?.examples) ? previousResources.examples : [],
+    scripts: Array.isArray(previousResources?.scripts) ? previousResources.scripts : [],
+  };
+  const next = {
+    references: Array.isArray(nextResources?.references) ? nextResources.references : [],
+    examples: Array.isArray(nextResources?.examples) ? nextResources.examples : [],
+    scripts: Array.isArray(nextResources?.scripts) ? nextResources.scripts : [],
+  };
+
+  const diffOne = (a, b) => {
+    const aSet = new Set(a.map(normalizeReferencePath));
+    const bSet = new Set(b.map(normalizeReferencePath));
+    const added = [];
+    const removed = [];
+
+    for (const item of bSet) {
+      if (item && !aSet.has(item)) added.push(item);
+    }
+    for (const item of aSet) {
+      if (item && !bSet.has(item)) removed.push(item);
+    }
+
+    added.sort();
+    removed.sort();
+    return { added, removed, addedCount: added.length, removedCount: removed.length };
+  };
+
+  const references = diffOne(prev.references, next.references);
+  const examples = diffOne(prev.examples, next.examples);
+  const scripts = diffOne(prev.scripts, next.scripts);
+
+  return {
+    references,
+    examples,
+    scripts,
+    changed: Boolean(
+      references.addedCount || references.removedCount ||
+      examples.addedCount || examples.removedCount ||
+      scripts.addedCount || scripts.removedCount
+    ),
+  };
+}
+
+function computeSkillContentDiff(previousSkill, nextSkill) {
+  const prevRaw = String(previousSkill?.raw || previousSkill?.body || "");
+  const nextRaw = String(nextSkill?.raw || nextSkill?.body || "");
+  const prevBytes = Number(previousSkill?.bytes) > 0 ? Number(previousSkill.bytes) : new TextEncoder().encode(prevRaw).length;
+  const nextBytes = Number(nextSkill?.bytes) > 0 ? Number(nextSkill.bytes) : new TextEncoder().encode(nextRaw).length;
+
+  return {
+    changed: prevRaw !== nextRaw,
+    previousBytes: prevBytes,
+    nextBytes,
+    bytesDelta: nextBytes - prevBytes,
+  };
+}
+
+function buildSkillImportPreview(resolvedSource) {
+  const parsed = parseSkillMarkdown(resolvedSource.markdownText);
+  const name = inferSkillName(parsed);
+  const description = inferSkillDescription(parsed);
+  const skillBody = String(parsed.body || "").trim();
+  const skillRaw = String(parsed.raw || "");
+  const bytes = Number(resolvedSource.markdownBytes) > 0
+    ? Number(resolvedSource.markdownBytes)
+    : new TextEncoder().encode(skillRaw).length;
+
+  const warnings = [];
+  if (!parsed.hasFrontmatter) {
+    warnings.push("未检测到 YAML frontmatter，可能不是标准 Claude Code skill。");
+  }
+  if (!String(parsed.frontmatter?.description || "").trim()) {
+    warnings.push("frontmatter 缺少 description，触发效果可能较弱。");
+  }
+  if (!skillBody) {
+    warnings.push("SKILL.md 正文为空。");
+  }
+
+  const scriptsCount = resolvedSource.resourceIndex?.scripts?.length || 0;
+  if (scriptsCount > 0) {
+    warnings.push(`检测到 ${scriptsCount} 个 scripts 资源；当前扩展仅展示，不执行远程脚本。`);
+  }
+
+  return {
+    sourceUrl: resolvedSource.sourceUrl,
+    skillUrl: resolvedSource.skillUrl,
+    name,
+    safeName: sanitizeSkillPackageName(name) || "skill_package",
+    description,
+    warnings,
+    repository: resolvedSource.repository,
+    skillPath: resolvedSource.skillPath || "SKILL.md",
+    resources: {
+      references: resolvedSource.resourceIndex?.references || [],
+      examples: resolvedSource.resourceIndex?.examples || [],
+      scripts: resolvedSource.resourceIndex?.scripts || [],
+    },
+    skill: {
+      frontmatter: parsed.frontmatter || {},
+      body: skillBody,
+      raw: skillRaw,
+      bytes,
+    },
+  };
+}
+
+function buildSkillPackageFromPreview(preview, previous = null) {
+  const now = new Date().toISOString();
+  const safeName = sanitizeSkillPackageName(preview?.name || "") || "skill_package";
+  const prevId = previous && typeof previous.id === "string" ? previous.id : "";
+
+  return {
+    id: prevId || `sp_${safeName}_${Date.now().toString(36)}`,
+    name: String(preview?.name || "Unnamed Skill"),
+    description: String(preview?.description || "Imported SKILL.md"),
+    enabled: previous ? previous.enabled !== false : true,
+    sourceUrl: String(preview?.sourceUrl || ""),
+    skillUrl: String(preview?.skillUrl || ""),
+    homepageUrl: String(preview?.sourceUrl || ""),
+    importedAt: previous?.importedAt || now,
+    updatedAt: now,
+    repository: preview?.repository || null,
+    skillPath: String(preview?.skillPath || "SKILL.md"),
+    resources: {
+      references: Array.isArray(preview?.resources?.references) ? preview.resources.references : [],
+      examples: Array.isArray(preview?.resources?.examples) ? preview.resources.examples : [],
+      scripts: Array.isArray(preview?.resources?.scripts) ? preview.resources.scripts : [],
+    },
+    skill: {
+      frontmatter: preview?.skill?.frontmatter || {},
+      body: String(preview?.skill?.body || ""),
+      raw: String(preview?.skill?.raw || ""),
+      bytes: Number(preview?.skill?.bytes) > 0 ? Number(preview.skill.bytes) : new TextEncoder().encode(String(preview?.skill?.raw || "")).length,
+    },
+  };
+}
+
+function upsertSkillPackage(packages, nextPackage) {
+  const list = Array.isArray(packages) ? [...packages] : [];
+  const index = list.findIndex(item => item?.id === nextPackage.id || (item?.sourceUrl && item.sourceUrl === nextPackage.sourceUrl));
+  if (index >= 0) {
+    list[index] = nextPackage;
+  } else {
+    list.push(nextPackage);
+  }
+  return list;
+}
+
+function extractTriggerPhrases(description = "") {
+  const text = String(description || "");
+  const phrases = [];
+  const regex = /["“](.+?)["”]/g;
+  let match;
+
+  while ((match = regex.exec(text))) {
+    const phrase = String(match[1] || "").trim();
+    if (phrase) phrases.push(phrase);
+  }
+
+  return phrases;
+}
+
+function scorePathAgainstKeywords(path, keywords) {
+  const tokens = tokenizeResourcePath(path);
+  if (tokens.length === 0 || keywords.length === 0) return 0;
+
+  let score = 0;
+  for (const keyword of keywords) {
+    const kw = cleanForMatch(keyword);
+    if (!kw) continue;
+
+    for (const token of tokens) {
+      if (token === kw) {
+        score += 3;
+      } else if (token.includes(kw) || kw.includes(token)) {
+        score += 1;
+      }
+    }
+  }
+
+  return score;
+}
+
+function pickReferenceCandidates(pkg, userText, runtime) {
+  const refs = Array.isArray(pkg?.resources?.references)
+    ? pkg.resources.references.map(normalizeReferencePath).filter(Boolean)
+    : [];
+
+  if (refs.length === 0) return [];
+
+  const keywords = splitTopKeywords(userText, 12);
+  const scored = refs.map(path => {
+    let score = scorePathAgainstKeywords(path, keywords);
+    const lower = path.toLowerCase();
+    if (lower.includes("overview") || lower.includes("readme") || lower.includes("guide")) {
+      score += 1;
+    }
+    return { path, score };
+  });
+
+  scored.sort((a, b) => {
+    if (b.score !== a.score) return b.score - a.score;
+    return a.path.localeCompare(b.path);
+  });
+
+  const maxPerSkill = Math.max(1, Math.min(5, Number(runtime.maxReferencesPerSkill) || DEFAULT_SKILL_RUNTIME.maxReferencesPerSkill));
+  const top = scored.slice(0, maxPerSkill).map(item => item.path);
+
+  if (top.length === 0) {
+    return refs.slice(0, maxPerSkill);
+  }
+
+  return top;
+}
+
+function pickExampleCandidates(pkg, userText, runtime) {
+  const examples = Array.isArray(pkg?.resources?.examples)
+    ? pkg.resources.examples.map(normalizeReferencePath).filter(Boolean)
+    : [];
+
+  if (examples.length === 0) return [];
+
+  const keywords = splitTopKeywords(userText, 12);
+  const scored = examples.map(path => {
+    let score = scorePathAgainstKeywords(path, keywords);
+    const lower = path.toLowerCase();
+    if (lower.includes("example") || lower.includes("demo") || lower.includes("sample")) {
+      score += 1;
+    }
+    return { path, score };
+  });
+
+  scored.sort((a, b) => {
+    if (b.score !== a.score) return b.score - a.score;
+    return a.path.localeCompare(b.path);
+  });
+
+  const maxPerSkill = Math.max(0, Math.min(3, Number(runtime.maxExamplesPerSkill) || DEFAULT_SKILL_RUNTIME.maxExamplesPerSkill));
+  if (maxPerSkill === 0) return [];
+
+  const top = scored.slice(0, maxPerSkill).map(item => item.path);
+  if (top.length === 0) return examples.slice(0, maxPerSkill);
+  return top;
+}
+
+function buildRawGitHubFileUrl(repository, path) {
+  if (!repository || repository.host !== "github") return "";
+  if (!repository.owner || !repository.repo || !repository.ref) return "";
+
+  const normalizedPath = normalizeReferencePath(path);
+  if (!normalizedPath) return "";
+
+  return `https://raw.githubusercontent.com/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.repo)}/${encodeURIComponent(repository.ref)}/${encodeGitHubPath(normalizedPath)}`;
+}
+
+function readCachedReferenceSnippet(cacheKey) {
+  const cached = skillReferenceCache.get(cacheKey);
+  if (!cached) return "";
+  if (cached.expiresAt <= Date.now()) {
+    skillReferenceCache.delete(cacheKey);
+    return "";
+  }
+  return String(cached.text || "");
+}
+
+function writeCachedReferenceSnippet(cacheKey, text) {
+  const safeText = String(text || "");
+  if (!safeText) return;
+  skillReferenceCache.set(cacheKey, {
+    text: safeText,
+    expiresAt: Date.now() + 10 * 60 * 1000,
+  });
+}
+
+function extractReferenceSnippet(text, userText, maxChars) {
+  const normalized = String(text || "").replace(/\r\n/g, "\n");
+  if (!normalized.trim()) return "";
+
+  const maxLength = Math.max(300, Number(maxChars) || DEFAULT_SKILL_RUNTIME.maxReferenceSnippetChars);
+  const keywords = splitTopKeywords(userText, 10)
+    .map(cleanForMatch)
+    .filter(Boolean)
+    .slice(0, 8);
+
+  if (keywords.length === 0) {
+    return normalized.slice(0, maxLength).trim();
+  }
+
+  const keywordRegex = new RegExp(keywords.map(escapeRegExp).join("|"), "i");
+  const lines = normalized.split("\n");
+  const snippets = [];
+  const used = new Set();
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const lineForMatch = cleanForMatch(line);
+    if (!lineForMatch || !keywordRegex.test(lineForMatch)) continue;
+
+    const start = Math.max(0, i - 2);
+    const end = Math.min(lines.length - 1, i + 2);
+    const key = `${start}-${end}`;
+    if (used.has(key)) continue;
+    used.add(key);
+
+    const block = lines.slice(start, end + 1).join("\n").trim();
+    if (!block) continue;
+    snippets.push(block);
+
+    const joined = snippets.join("\n---\n");
+    if (joined.length >= maxLength) {
+      return joined.slice(0, maxLength).trim();
+    }
+  }
+
+  if (snippets.length > 0) {
+    return snippets.join("\n---\n").slice(0, maxLength).trim();
+  }
+
+  return normalized.slice(0, maxLength).trim();
+}
+
+async function fetchReferenceSnippetForPackage(pkg, referencePath, userText, runtime) {
+  const normalizedPath = normalizeReferencePath(referencePath);
+  if (!normalizedPath) return "";
+
+  const cacheKey = [
+    pkg?.id || "pkg",
+    pkg?.repository?.owner || "",
+    pkg?.repository?.repo || "",
+    pkg?.repository?.ref || "",
+    normalizedPath,
+  ].join("::");
+
+  const cached = readCachedReferenceSnippet(cacheKey);
+  if (cached) return cached;
+
+  const url = buildRawGitHubFileUrl(pkg?.repository, normalizedPath);
+  if (!url) return "";
+
+  const maxFetchBytes = Math.max(16 * 1024, Number(runtime.maxReferenceFetchBytes) || DEFAULT_SKILL_RUNTIME.maxReferenceFetchBytes);
+  const maxSnippetChars = Math.max(300, Number(runtime.maxReferenceSnippetChars) || DEFAULT_SKILL_RUNTIME.maxReferenceSnippetChars);
+
+  const { text } = await fetchTextWithLimit(url, {
+    accept: "text/plain, text/markdown",
+    maxBytes: maxFetchBytes,
+    timeoutMs: SKILL_IMPORT_TIMEOUT_MS,
+  });
+
+  const snippet = extractReferenceSnippet(text, userText, maxSnippetChars);
+  writeCachedReferenceSnippet(cacheKey, snippet);
+  return snippet;
+}
+
+async function loadReferenceSnippetsForPackage(pkg, userText, runtime, remainingChars) {
+  const candidates = pickReferenceCandidates(pkg, userText, runtime);
+  const snippets = [];
+  let remaining = Math.max(0, Number(remainingChars) || 0);
+
+  for (const path of candidates) {
+    if (remaining <= 0) break;
+    try {
+      const snippet = await fetchReferenceSnippetForPackage(pkg, path, userText, runtime);
+      if (!snippet) continue;
+      const clipped = snippet.slice(0, remaining);
+      if (!clipped.trim()) continue;
+
+      snippets.push({ path, snippet: clipped.trim() });
+      remaining -= clipped.length;
+    } catch {
+      // 忽略单个 reference 拉取失败
+    }
+  }
+
+  return snippets;
+}
+
+async function fetchExampleSnippetForPackage(pkg, examplePath, userText, runtime) {
+  const normalizedPath = normalizeReferencePath(examplePath);
+  if (!normalizedPath) return "";
+
+  const cacheKey = [
+    "ex",
+    pkg?.id || "pkg",
+    pkg?.repository?.owner || "",
+    pkg?.repository?.repo || "",
+    pkg?.repository?.ref || "",
+    normalizedPath,
+  ].join("::");
+
+  const cached = readCachedReferenceSnippet(cacheKey);
+  if (cached) return cached;
+
+  const url = buildRawGitHubFileUrl(pkg?.repository, normalizedPath);
+  if (!url) return "";
+
+  const maxFetchBytes = Math.max(16 * 1024, Number(runtime.maxReferenceFetchBytes) || DEFAULT_SKILL_RUNTIME.maxReferenceFetchBytes);
+  const maxSnippetChars = Math.max(300, Number(runtime.maxExampleSnippetChars) || DEFAULT_SKILL_RUNTIME.maxExampleSnippetChars);
+
+  const { text } = await fetchTextWithLimit(url, {
+    accept: "text/plain, text/markdown",
+    maxBytes: maxFetchBytes,
+    timeoutMs: SKILL_IMPORT_TIMEOUT_MS,
+  });
+
+  const snippet = extractReferenceSnippet(text, userText, maxSnippetChars);
+  writeCachedReferenceSnippet(cacheKey, snippet);
+  return snippet;
+}
+
+async function loadExampleSnippetsForPackage(pkg, userText, runtime, remainingChars) {
+  const candidates = pickExampleCandidates(pkg, userText, runtime);
+  const snippets = [];
+  let remaining = Math.max(0, Number(remainingChars) || 0);
+
+  for (const path of candidates) {
+    if (remaining <= 0) break;
+    try {
+      const snippet = await fetchExampleSnippetForPackage(pkg, path, userText, runtime);
+      if (!snippet) continue;
+      const clipped = snippet.slice(0, remaining);
+      if (!clipped.trim()) continue;
+
+      snippets.push({ path, snippet: clipped.trim() });
+      remaining -= clipped.length;
+    } catch {
+      // 忽略单个 example 拉取失败
+    }
+  }
+
+  return snippets;
+}
+
+function scoreSkillPackageForInput(pkg, userText) {
+  const text = String(userText || "").trim().toLowerCase();
+  const normalizedText = cleanForMatch(userText);
+  if (!text || !normalizedText) return 0;
+
+  let score = 0;
+  const pkgName = String(pkg?.name || "").trim();
+  const normalizedName = cleanForMatch(pkgName);
+  if (normalizedName && normalizedText.includes(normalizedName)) {
+    score += 8;
+  }
+
+  const descText = String(pkg?.skill?.frontmatter?.description || pkg?.description || "").trim();
+  const descLower = descText.toLowerCase();
+  const triggers = extractTriggerPhrases(descText);
+
+  for (const phrase of triggers) {
+    const p = String(phrase || "").trim().toLowerCase();
+    if (!p) continue;
+    if (text.includes(p) || normalizedText.includes(cleanForMatch(p))) {
+      score += 10;
+    }
+  }
+
+  const keywords = splitTopKeywords(userText, 12);
+  let keywordHits = 0;
+  for (const kw of keywords) {
+    const lower = kw.toLowerCase();
+    if (!lower) continue;
+    if (descLower.includes(lower)) {
+      keywordHits += 1;
+    }
+  }
+  score += Math.min(6, keywordHits * 2);
+
+  if (score === 0 && pkgName && text.includes(pkgName.toLowerCase())) {
+    score += 4;
+  }
+
+  return score;
+}
+
+function selectSkillPackagesForInput(userText) {
+  const runtime = normalizeSkillRuntime(config.skillRuntime);
+  if (!runtime.enabled) return [];
+
+  const text = String(userText || "").trim();
+  if (!text) return [];
+
+  const candidates = [];
+  for (const pkg of config.skillPackages || []) {
+    if (!pkg?.enabled) continue;
+    const score = scoreSkillPackageForInput(pkg, userText);
+    if (score <= 0) continue;
+    candidates.push({ pkg, score });
+  }
+
+  candidates.sort((a, b) => {
+    if (b.score !== a.score) return b.score - a.score;
+    return String(a.pkg?.name || "").localeCompare(String(b.pkg?.name || ""));
+  });
+
+  const maxTriggered = Math.max(
+    1,
+    Math.min(4, Number(runtime.maxTriggeredSkillsPerTurn) || DEFAULT_SKILL_RUNTIME.maxTriggeredSkillsPerTurn)
+  );
+
+  return candidates.slice(0, maxTriggered).map(item => item.pkg);
+}
+
+async function buildSkillContextMessage(userText, selectedPackages) {
+  if (!Array.isArray(selectedPackages) || selectedPackages.length === 0) return "";
+
+  const runtime = normalizeSkillRuntime(config.skillRuntime);
+  const maxBodyChars = Math.max(1000, Number(runtime.maxSkillBodyChars) || DEFAULT_SKILL_RUNTIME.maxSkillBodyChars);
+  let remainingRefChars = Math.max(0, Number(runtime.maxTotalReferenceChars) || DEFAULT_SKILL_RUNTIME.maxTotalReferenceChars);
+  let remainingExampleChars = Math.max(0, Number(runtime.maxTotalExampleChars) || DEFAULT_SKILL_RUNTIME.maxTotalExampleChars);
+
+  const blocks = [];
+
+  for (let index = 0; index < selectedPackages.length; index++) {
+    const pkg = selectedPackages[index];
+    const desc = String(pkg.description || pkg.skill?.frontmatter?.description || "").trim();
+    const body = String(pkg.skill?.body || pkg.skill?.raw || "").trim();
+    const trimmedBody = body.length > maxBodyChars ? `${body.slice(0, maxBodyChars)}\n...(truncated)` : body;
+
+    const references = remainingRefChars > 0
+      ? await loadReferenceSnippetsForPackage(pkg, userText, runtime, remainingRefChars)
+      : [];
+
+    const referenceBlocks = [];
+    for (const ref of references) {
+      const snippet = String(ref.snippet || "").slice(0, remainingRefChars);
+      if (!snippet.trim()) continue;
+      remainingRefChars -= snippet.length;
+      referenceBlocks.push([
+        `- ${ref.path}`,
+        snippet,
+      ].join("\n"));
+      if (remainingRefChars <= 0) break;
+    }
+
+    const examples = remainingExampleChars > 0
+      ? await loadExampleSnippetsForPackage(pkg, userText, runtime, remainingExampleChars)
+      : [];
+
+    const exampleBlocks = [];
+    for (const example of examples) {
+      const snippet = String(example.snippet || "").slice(0, remainingExampleChars);
+      if (!snippet.trim()) continue;
+      remainingExampleChars -= snippet.length;
+      exampleBlocks.push([
+        `- ${example.path}`,
+        snippet,
+      ].join("\n"));
+      if (remainingExampleChars <= 0) break;
+    }
+
+    blocks.push([
+      `### Skill ${index + 1}: ${pkg.name}`,
+      desc ? `Description: ${desc}` : "",
+      "Instructions:",
+      trimmedBody || "(empty)",
+      referenceBlocks.length > 0
+        ? ["Referenced snippets:", ...referenceBlocks].join("\n")
+        : "Referenced snippets: (none loaded)",
+      exampleBlocks.length > 0
+        ? ["Example snippets:", ...exampleBlocks].join("\n")
+        : "Example snippets: (none loaded)",
+    ].filter(Boolean).join("\n\n"));
+  }
+
+  return [
+    "以下是匹配到的技能包指令，请优先遵循这些技能流程来回应用户请求。",
+    "若技能与用户请求无关，请忽略。",
+    "不要执行 skills 中 scripts 目录里的远程脚本；scripts 仅作为参考资源。",
+    "",
+    ...blocks,
+  ].join("\n\n");
+}
+
+function withSkillContextMessages(messages, skillContextMessage) {
+  if (!skillContextMessage) return messages;
+  const list = Array.isArray(messages) ? messages : [];
+  if (list.length === 0) {
+    return [{ role: "system", content: skillContextMessage }];
+  }
+
+  const last = list[list.length - 1];
+  if (last?.role === "user") {
+    return [
+      ...list.slice(0, -1),
+      { role: "system", content: skillContextMessage },
+      last,
+    ];
+  }
+
+  return [...list, { role: "system", content: skillContextMessage }];
 }
 
 function normalizeUserInput(userInput) {
@@ -536,14 +1671,15 @@ chrome.runtime.onConnect.addListener((port) => {
 });
 
 // ---- API 调用 ----
-async function callAPI(messages, { stream = false, onDelta, onToolCalls } = {}) {
+async function callAPI(messages, { stream = false, onDelta, onToolCalls, skillContextMessage = "" } = {}) {
   // 合并内置工具 + Skills + MCP 动态工具
   const dynamicTools = buildDynamicTools();
   const allTools = [...TOOLS, ...dynamicTools.map(t => ({ type: t.type, function: t.function }))];
+  const requestMessages = withSkillContextMessages(messages, skillContextMessage);
 
   const body = {
     model: config.model,
-    messages: messages,
+    messages: requestMessages,
     tools: allTools.length > 0 ? allTools : undefined,
     tool_choice: allTools.length > 0 ? "auto" : undefined,
     stream: stream,
@@ -1097,9 +2233,12 @@ async function runAgent(tabId, rawUserInput, sendUpdate) {
   const messages = conversations.get(tabId);
   messages.push(buildUserMessage(userInput.text, attachments, multimodal));
 
+  const selectedSkillPackages = selectSkillPackagesForInput(userInput.text);
+
   sendUpdate({ type: "thinking" });
 
   try {
+    const skillContextMessage = await buildSkillContextMessage(userInput.text, selectedSkillPackages);
     let loopCount = 0;
     const MAX_LOOPS = config.maxLoops || 20;
 
@@ -1109,6 +2248,7 @@ async function runAgent(tabId, rawUserInput, sendUpdate) {
       loopCount++;
       const response = await callAPI(messages, {
         stream: true,
+        skillContextMessage,
         onDelta: (delta, full) => {
           sendUpdate({
             type: "assistant_delta",
@@ -1427,6 +2567,183 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
       sendResponse({ ok: true, results });
     }).catch(e => sendResponse({ ok: false, error: getErrorMessage(e) }));
+    return true;
+  }
+
+  if (message.type === "SKILL_IMPORT_PREVIEW") {
+    const sourceUrl = String(message?.sourceUrl || "").trim();
+    resolveSkillImportSource(sourceUrl)
+      .then(buildSkillImportPreview)
+      .then(preview => {
+        const runtime = normalizeSkillRuntime(config.skillRuntime);
+        if (preview.skill.bytes > runtime.maxSkillBytes) {
+          sendResponse({
+            ok: false,
+            error: `SKILL.md 超出大小限制：${preview.skill.bytes} bytes > ${runtime.maxSkillBytes} bytes`,
+          });
+          return;
+        }
+        sendResponse({ ok: true, preview });
+      })
+      .catch(error => sendResponse({ ok: false, error: getErrorMessage(error) }));
+    return true;
+  }
+
+  if (message.type === "SKILL_IMPORT_COMMIT") {
+    const preview = message?.preview;
+    if (!preview || typeof preview !== "object") {
+      sendResponse({ ok: false, error: "缺少预览数据，请先执行预览" });
+      return true;
+    }
+
+    loadConfig()
+      .then(async () => {
+        const runtime = normalizeSkillRuntime(config.skillRuntime);
+        const currentPackages = normalizeSkillPackages(config.skillPackages);
+        const existing = currentPackages.find(item => item.sourceUrl && item.sourceUrl === preview.sourceUrl) || null;
+        const nextPackage = buildSkillPackageFromPreview(preview, existing);
+
+        if (!existing && currentPackages.length >= runtime.maxPackages) {
+          throw new Error(`Skill 包数量已达上限（${runtime.maxPackages}）`);
+        }
+        if (nextPackage.skill.bytes > runtime.maxSkillBytes) {
+          throw new Error(`SKILL.md 超出大小限制：${nextPackage.skill.bytes} bytes > ${runtime.maxSkillBytes} bytes`);
+        }
+
+        const nextPackages = upsertSkillPackage(currentPackages, nextPackage);
+        await saveConfig({
+          ...config,
+          skillPackages: nextPackages,
+        });
+
+        return nextPackage;
+      })
+      .then(saved => sendResponse({ ok: true, package: saved }))
+      .catch(error => sendResponse({ ok: false, error: getErrorMessage(error) }));
+
+    return true;
+  }
+
+  if (message.type === "SKILL_PACKAGE_LIST") {
+    loadConfig()
+      .then(() => {
+        const packages = normalizeSkillPackages(config.skillPackages);
+        sendResponse({ ok: true, packages });
+      })
+      .catch(error => sendResponse({ ok: false, error: getErrorMessage(error) }));
+    return true;
+  }
+
+  if (message.type === "SKILL_PACKAGE_TOGGLE") {
+    const packageId = String(message?.packageId || "").trim();
+    const enabled = message?.enabled !== false;
+    if (!packageId) {
+      sendResponse({ ok: false, error: "缺少 packageId" });
+      return true;
+    }
+
+    loadConfig()
+      .then(async () => {
+        const packages = normalizeSkillPackages(config.skillPackages);
+        const idx = packages.findIndex(item => item.id === packageId);
+        if (idx < 0) {
+          throw new Error("未找到指定 Skill 包");
+        }
+
+        packages[idx] = {
+          ...packages[idx],
+          enabled,
+          updatedAt: new Date().toISOString(),
+        };
+
+        await saveConfig({
+          ...config,
+          skillPackages: packages,
+        });
+
+        return packages[idx];
+      })
+      .then(updated => sendResponse({ ok: true, package: updated }))
+      .catch(error => sendResponse({ ok: false, error: getErrorMessage(error) }));
+
+    return true;
+  }
+
+  if (message.type === "SKILL_PACKAGE_REMOVE") {
+    const packageId = String(message?.packageId || "").trim();
+    if (!packageId) {
+      sendResponse({ ok: false, error: "缺少 packageId" });
+      return true;
+    }
+
+    loadConfig()
+      .then(async () => {
+        const packages = normalizeSkillPackages(config.skillPackages);
+        const nextPackages = packages.filter(item => item.id !== packageId);
+        if (nextPackages.length === packages.length) {
+          throw new Error("未找到指定 Skill 包");
+        }
+
+        await saveConfig({
+          ...config,
+          skillPackages: nextPackages,
+        });
+      })
+      .then(() => sendResponse({ ok: true }))
+      .catch(error => sendResponse({ ok: false, error: getErrorMessage(error) }));
+
+    return true;
+  }
+
+  if (message.type === "SKILL_PACKAGE_REFRESH") {
+    const packageId = String(message?.packageId || "").trim();
+    if (!packageId) {
+      sendResponse({ ok: false, error: "缺少 packageId" });
+      return true;
+    }
+
+    loadConfig()
+      .then(async () => {
+        const packages = normalizeSkillPackages(config.skillPackages);
+        const idx = packages.findIndex(item => item.id === packageId);
+        if (idx < 0) {
+          throw new Error("未找到指定 Skill 包");
+        }
+
+        const current = packages[idx];
+        if (!current.sourceUrl) {
+          throw new Error("当前 Skill 包缺少 sourceUrl，无法刷新");
+        }
+
+        const resolved = await resolveSkillImportSource(current.sourceUrl);
+        const preview = buildSkillImportPreview(resolved);
+        const runtime = normalizeSkillRuntime(config.skillRuntime);
+        if (preview.skill.bytes > runtime.maxSkillBytes) {
+          throw new Error(`SKILL.md 超出大小限制：${preview.skill.bytes} bytes > ${runtime.maxSkillBytes} bytes`);
+        }
+
+        const refreshed = buildSkillPackageFromPreview(preview, current);
+        const resourceDiff = computeResourceDiff(current.resources, refreshed.resources);
+        const skillDiff = computeSkillContentDiff(current.skill, refreshed.skill);
+
+        packages[idx] = refreshed;
+
+        await saveConfig({
+          ...config,
+          skillPackages: packages,
+        });
+
+        return {
+          package: refreshed,
+          diff: {
+            resources: resourceDiff,
+            skill: skillDiff,
+          },
+        };
+      })
+      .then(result => sendResponse({ ok: true, package: result.package, diff: result.diff }))
+      .catch(error => sendResponse({ ok: false, error: getErrorMessage(error) }));
+
     return true;
   }
 });

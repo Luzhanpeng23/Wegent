@@ -25,6 +25,12 @@ export default function App() {
     sendMessage,
     clearConversation,
     saveConfig,
+    skillImportPreview,
+    skillImportCommit,
+    listSkillPackages,
+    toggleSkillPackage,
+    removeSkillPackage,
+    refreshSkillPackage,
   } = useChromeAgent()
 
   const [view, setView] = useState('chat')
@@ -104,6 +110,14 @@ export default function App() {
             onCancel={handleBackToChat}
             theme={theme}
             onThemeChange={setTheme}
+            skillApi={{
+              preview: skillImportPreview,
+              commit: skillImportCommit,
+              list: listSkillPackages,
+              toggle: toggleSkillPackage,
+              remove: removeSkillPackage,
+              refresh: refreshSkillPackage,
+            }}
           />
         ) : (
           <>

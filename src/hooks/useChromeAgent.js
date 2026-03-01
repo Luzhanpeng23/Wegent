@@ -26,6 +26,8 @@ const DEV_CONFIG = {
     imageQuality: 0.82,
     screenshotDetail: 'low',
   },
+  skills: [],
+  mcpServers: [],
   systemPrompt: '',
 }
 
@@ -254,6 +256,8 @@ export function useChromeAgent() {
         ...((prev && prev.multimodal) || DEV_CONFIG.multimodal),
         ...((newConfig && newConfig.multimodal) || {}),
       },
+      skills: Array.isArray(newConfig?.skills) ? newConfig.skills : (prev?.skills || []),
+      mcpServers: Array.isArray(newConfig?.mcpServers) ? newConfig.mcpServers : (prev?.mcpServers || []),
     }))
   }, [])
 

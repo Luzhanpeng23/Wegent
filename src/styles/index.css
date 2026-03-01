@@ -634,6 +634,313 @@ body {
   transform: translateY(1px);
 }
 
+/* ---- Skills / MCP 管理器 ---- */
+.settings-hint {
+  margin: 0 0 6px;
+  font-size: 11px;
+  color: var(--text-tertiary);
+  line-height: 1.5;
+}
+
+.ext-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  background: var(--border);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  overflow: hidden;
+  margin-bottom: 8px;
+}
+
+.ext-list-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  background: var(--panel);
+  min-height: 32px;
+}
+
+.ext-list-item .toggle-item.compact {
+  flex: 1;
+  min-width: 0;
+  gap: 6px;
+}
+
+.ext-item-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ext-item-badge {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 9px;
+  background: var(--panel-quiet);
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.ext-item-badge.success {
+  background: rgba(44, 138, 98, 0.12);
+  color: #2c8a62;
+}
+
+.ext-item-badge.error {
+  background: rgba(207, 103, 79, 0.12);
+  color: #cf674f;
+}
+
+.ext-item-actions {
+  display: flex;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.icon-btn-sm.danger {
+  color: var(--text-tertiary);
+}
+
+.icon-btn-sm.danger:hover {
+  color: #cf674f;
+  background: rgba(207, 103, 79, 0.1);
+}
+
+.btn-add {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+  transition: all var(--motion-fast) var(--ease-out);
+}
+
+.btn-add:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: rgba(47, 111, 237, 0.04);
+}
+
+.btn-sm {
+  padding: 5px 10px;
+  font-size: 11px;
+}
+
+.ext-edit-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.ext-bottom-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.mono-textarea {
+  font-family: "SF Mono", "Fira Code", "Cascadia Code", Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.form-group-third {
+  flex: 0 0 80px;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.spin {
+  animation: spin 1s linear infinite;
+}
+
+/* ---- MCP 服务器卡片 ---- */
+.mcp-server-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.mcp-server-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  background: var(--panel);
+  overflow: hidden;
+  transition: border-color var(--motion-fast) var(--ease-out);
+}
+
+.mcp-server-card.status-success {
+  border-left: 3px solid #2c8a62;
+}
+
+.mcp-server-card.status-error {
+  border-left: 3px solid #cf674f;
+}
+
+.mcp-server-card.status-warn {
+  border-left: 3px solid #c59a2e;
+}
+
+.mcp-server-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 8px;
+}
+
+.mcp-server-header .toggle-item.compact {
+  flex: 1;
+  min-width: 0;
+  gap: 6px;
+  align-items: flex-start;
+}
+
+.mcp-server-info {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.mcp-server-url {
+  font-size: 10px;
+  color: var(--text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-top: 1px;
+}
+
+.mcp-server-meta {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+}
+
+.mcp-status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.mcp-status-dot.success { background: #2c8a62; }
+.mcp-status-dot.error { background: #cf674f; }
+.mcp-status-dot.warn { background: #c59a2e; }
+
+.mcp-tool-count {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-tertiary);
+  background: none;
+  border: none;
+  padding: 2px 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  white-space: nowrap;
+}
+
+.mcp-tool-count.clickable {
+  cursor: pointer;
+  color: var(--text-secondary);
+}
+
+.mcp-tool-count.clickable:hover {
+  color: var(--accent);
+}
+
+.mcp-chevron {
+  transition: transform var(--motion-fast) var(--ease-out);
+}
+
+.mcp-chevron.expanded {
+  transform: rotate(180deg);
+}
+
+.mcp-error-detail {
+  display: flex;
+  align-items: flex-start;
+  gap: 5px;
+  padding: 5px 10px 7px;
+  font-size: 10px;
+  line-height: 1.4;
+  color: #cf674f;
+  background: rgba(207, 103, 79, 0.06);
+  border-top: 1px solid rgba(207, 103, 79, 0.12);
+  word-break: break-all;
+}
+
+.mcp-error-detail svg {
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.mcp-tools-panel {
+  border-top: 1px solid var(--border);
+  background: var(--panel-soft);
+  padding: 6px 8px 8px;
+}
+
+.mcp-tools-header {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  margin-bottom: 5px;
+}
+
+.mcp-tools-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.mcp-tool-item {
+  display: flex;
+  flex-direction: column;
+  padding: 4px 6px;
+  border-radius: 4px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+}
+
+.mcp-tool-name {
+  font-size: 11px;
+  font-weight: 600;
+  font-family: "SF Mono", "Fira Code", "Cascadia Code", Consolas, monospace;
+  color: var(--text-primary);
+}
+
+.mcp-tool-desc {
+  font-size: 10px;
+  color: var(--text-tertiary);
+  line-height: 1.3;
+  margin-top: 1px;
+}
+
 /* ---- Chat ---- */
 .chat-container {
   flex: 1;

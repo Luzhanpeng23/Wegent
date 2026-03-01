@@ -26,14 +26,14 @@
     },
     {
       "matches": ["<all_urls>"],
-      "js": ["cf.js"],
+      "js": ["cf-main.js"],
       "world": "MAIN",
       "run_at": "document_start",
       "all_frames": true
     },
     {
       "matches": ["<all_urls>"],
-      "js": ["cf.js"],
+      "js": ["cf-isolated.js"],
       "run_at": "document_start",
       "all_frames": true
     }

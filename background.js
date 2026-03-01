@@ -23,11 +23,15 @@ const DEFAULT_CONFIG = {
   apiBase: "https://api.openai.com/v1",
   apiKey: "",
   model: "gpt-4o",
-  maxLoops: 20,
-  temperature: 0.7,
+  maxLoops: 99,
+  temperature: 0.9,
   topP: 1,
-  maxTokens: 4096,
+  maxTokens: 8192,
   multimodal: { ...DEFAULT_MULTIMODAL },
+  // 自定义技能列表
+  skills: [],
+  // MCP 远程服务器列表
+  mcpServers: [],
   systemPrompt: `你是一个浏览器操作助手。用户会用自然语言描述他们想在当前网页上执行的操作，你需要通过调用工具来完成这些操作。
 
 操作前请先使用 get_page_info 了解当前页面状态，然后根据需要使用 get_elements 获取页面元素信息。
@@ -270,6 +274,55 @@ let config = {
 };
 let conversations = new Map(); // tabId -> messages[]
 
+function normalizeMcpServer(server, fallbackId = "") {
+  if (!server || typeof server !== "object") return null;
+  const rawUrl = typeof server.url === "string" ? server.url.trim() : "";
+  if (!rawUrl) return null;
+
+  const idBase = String(server.id || fallbackId || `m_${Date.now().toString(36)}`);
+  const id = idBase.trim() || `m_${Date.now().toString(36)}`;
+
+  let name = typeof server.name === "string" ? server.name.trim() : "";
+  if (!name) {
+    try {
+      name = new URL(rawUrl).hostname;
+    } catch {
+      name = id;
+    }
+  }
+
+  return {
+    id,
+    name,
+    url: rawUrl,
+    apiKey: typeof server.apiKey === "string" ? server.apiKey : "",
+    enabled: server.enabled !== false,
+    type: typeof server.type === "string" ? server.type : undefined,
+  };
+}
+
+function normalizeMcpServers(raw) {
+  const source = (raw && typeof raw === "object" && !Array.isArray(raw) && raw.mcpServers)
+    ? raw.mcpServers
+    : raw;
+
+  if (Array.isArray(source)) {
+    return source.map((server, idx) => normalizeMcpServer(server, `mcp_${idx}`)).filter(Boolean);
+  }
+
+  // 兼容 Claude Desktop 风格：{ mcpServers: { name: { type, url } } }
+  if (source && typeof source === "object") {
+    const normalized = [];
+    for (const [name, value] of Object.entries(source)) {
+      const server = normalizeMcpServer({ ...(value || {}), name }, name);
+      if (server) normalized.push(server);
+    }
+    return normalized;
+  }
+
+  return [];
+}
+
 function mergeConfig(baseConfig = {}) {
   return {
     ...DEFAULT_CONFIG,
@@ -278,7 +331,20 @@ function mergeConfig(baseConfig = {}) {
       ...DEFAULT_MULTIMODAL,
       ...(baseConfig.multimodal || {}),
     },
+    skills: Array.isArray(baseConfig.skills) ? baseConfig.skills : [],
+    mcpServers: normalizeMcpServers(baseConfig.mcpServers),
   };
+}
+
+function getErrorMessage(error) {
+  if (!error) return "未知错误";
+  if (typeof error === "string") return error;
+  if (error instanceof Error) return error.message || error.name || "未知错误";
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return String(error);
+  }
 }
 
 function normalizeUserInput(userInput) {
@@ -471,11 +537,15 @@ chrome.runtime.onConnect.addListener((port) => {
 
 // ---- API 调用 ----
 async function callAPI(messages, { stream = false, onDelta, onToolCalls } = {}) {
+  // 合并内置工具 + Skills + MCP 动态工具
+  const dynamicTools = buildDynamicTools();
+  const allTools = [...TOOLS, ...dynamicTools.map(t => ({ type: t.type, function: t.function }))];
+
   const body = {
     model: config.model,
     messages: messages,
-    tools: TOOLS,
-    tool_choice: "auto",
+    tools: allTools.length > 0 ? allTools : undefined,
+    tool_choice: allTools.length > 0 ? "auto" : undefined,
     stream: stream,
   };
   if (config.temperature !== undefined) body.temperature = Number(config.temperature);
@@ -594,12 +664,353 @@ async function callAPI(messages, { stream = false, onDelta, onToolCalls } = {}) 
 }
 
 // ---- 执行工具调用 ----
+
+// ============================================================
+// MCP (Model Context Protocol) 远程工具调用客户端
+// 支持 Streamable HTTP 传输（JSON-RPC 2.0）
+// ============================================================
+const mcpSessionState = new Map(); // serverId -> { tools[], sessionId }
+const mcpToolNameMap = new Map();   // 完整工具名 -> { serverId, toolName, serverObj }
+
+function mcpJsonRpc(method, params = {}, id = null) {
+  return { jsonrpc: "2.0", method, params, id: id ?? Date.now() };
+}
+
+function parseMcpSsePayload(text) {
+  const raw = String(text || "");
+  const events = raw.split(/\r?\n\r?\n/);
+  const payloads = [];
+
+  for (const eventText of events) {
+    const lines = eventText.split(/\r?\n/);
+    const dataLines = [];
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith("data:")) continue;
+      dataLines.push(trimmed.slice(5).trim());
+    }
+
+    if (dataLines.length === 0) continue;
+    const data = dataLines.join("\n").trim();
+    if (!data || data === "[DONE]") continue;
+
+    try {
+      const parsed = JSON.parse(data);
+      payloads.push(parsed);
+    } catch {
+      // 忽略无法解析的事件
+    }
+  }
+
+  return payloads;
+}
+
+function toSafeMcpToolName(serverId, rawToolName) {
+  const normalize = (v, fallback) => {
+    const s = String(v || "")
+      .replace(/[^a-zA-Z0-9_-]/g, "_")
+      .replace(/_+/g, "_")
+      .replace(/^_+|_+$/g, "");
+    return s || fallback;
+  };
+
+  // FNV-1a 32-bit，保证短哈希稳定，避免重名冲突
+  const hashBase = `${serverId}::${rawToolName}`;
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < hashBase.length; i++) {
+    hash ^= hashBase.charCodeAt(i);
+    hash = (hash + ((hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24))) >>> 0;
+  }
+  const suffix = `_${hash.toString(36)}`;
+
+  const safeServerId = normalize(serverId, "server");
+  const safeToolName = normalize(rawToolName, "tool");
+
+  // 兼容 function.name 限制（最大 64）
+  const prefix = `mcp_${safeServerId}_`;
+  const maxToolLen = Math.max(1, 64 - prefix.length - suffix.length);
+  const trimmedToolName = safeToolName.slice(0, maxToolLen);
+
+  return `${prefix}${trimmedToolName}${suffix}`;
+}
+
+async function mcpRequest(server, method, params = {}, { useSession = true } = {}) {
+  const requestId = Date.now() + Math.floor(Math.random() * 1000);
+  const headers = {
+    "Content-Type": "application/json",
+    "Accept": "application/json, text/event-stream",
+  };
+  if (server.apiKey) headers["Authorization"] = `Bearer ${server.apiKey}`;
+  const session = mcpSessionState.get(server.id);
+  if (useSession && session?.sessionId) headers["Mcp-Session-Id"] = session.sessionId;
+
+  const res = await fetch(server.url, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(mcpJsonRpc(method, params, requestId)),
+  });
+  if (!res.ok) throw new Error(`MCP ${method} 失败 (${res.status}): ${await res.text()}`);
+
+  // 记录 session id
+  const sid = res.headers.get("Mcp-Session-Id");
+  if (sid) {
+    const s = mcpSessionState.get(server.id) || {};
+    s.sessionId = sid;
+    mcpSessionState.set(server.id, s);
+  }
+
+  const contentType = (res.headers.get("Content-Type") || "").toLowerCase();
+  const rawText = await res.text();
+  let payloads = [];
+
+  if (contentType.includes("text/event-stream")) {
+    payloads = parseMcpSsePayload(rawText);
+  } else {
+    try {
+      const json = JSON.parse(rawText);
+      payloads = Array.isArray(json) ? json : [json];
+    } catch {
+      throw new Error(`MCP ${method} 返回非 JSON 响应: ${rawText.slice(0, 300)}`);
+    }
+  }
+
+  if (!Array.isArray(payloads) || payloads.length === 0) {
+    throw new Error(`MCP ${method} 未返回可解析的数据`);
+  }
+
+  const payload = payloads.find(item => item && item.id === requestId)
+    || payloads.find(item => item && item.result)
+    || payloads.find(item => item && item.error)
+    || payloads[payloads.length - 1];
+
+  if (!payload || typeof payload !== "object") {
+    throw new Error(`MCP ${method} 响应格式无效`);
+  }
+
+  if (payload.error) {
+    throw new Error(`MCP ${method} 错误: ${payload.error.message || JSON.stringify(payload.error)}`);
+  }
+
+  if (payload.result === undefined) {
+    throw new Error(`MCP ${method} 缺少 result 字段`);
+  }
+
+  return payload.result;
+}
+
+async function mcpInitialize(server) {
+  const protocolVersions = ["2025-03-26", "2024-11-05"];
+  const capabilityCandidates = [
+    {},
+    { tools: {} },
+    { tools: { listChanged: true } },
+  ];
+  let lastError = null;
+
+  // initialize 前清理旧 session，避免服务端会话状态不一致
+  const state = mcpSessionState.get(server.id) || {};
+  delete state.sessionId;
+  mcpSessionState.set(server.id, state);
+
+  for (const protocolVersion of protocolVersions) {
+    for (const capabilities of capabilityCandidates) {
+      try {
+        const result = await mcpRequest(server, "initialize", {
+          protocolVersion,
+          capabilities,
+          clientInfo: { name: "DOM Agent", version: "1.0.0" },
+        }, { useSession: false });
+
+        // 发送 initialized 通知
+        const headers = {
+          "Content-Type": "application/json",
+          "Accept": "application/json, text/event-stream",
+        };
+        if (server.apiKey) headers["Authorization"] = `Bearer ${server.apiKey}`;
+        const session = mcpSessionState.get(server.id);
+        if (session?.sessionId) headers["Mcp-Session-Id"] = session.sessionId;
+        fetch(server.url, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }),
+        }).catch(() => {});
+
+        return result;
+      } catch (e) {
+        lastError = e;
+      }
+    }
+  }
+
+  throw lastError || new Error("MCP initialize 失败");
+}
+
+async function mcpListTools(server) {
+  const result = await mcpRequest(server, "tools/list", {});
+  return result?.tools || [];
+}
+
+async function mcpCallTool(server, toolName, args) {
+  const result = await mcpRequest(server, "tools/call", { name: toolName, arguments: args });
+  return result;
+}
+
+async function refreshMcpTools(serversOverride = null) {
+  const servers = Array.isArray(serversOverride) ? serversOverride : (config.mcpServers || []);
+  for (const server of servers) {
+    if (!server?.id || !server.enabled || !server.url) continue;
+    try {
+      await mcpInitialize(server);
+      const tools = await mcpListTools(server);
+      const s = mcpSessionState.get(server.id) || {};
+      s.tools = tools;
+      s.error = null;
+      mcpSessionState.set(server.id, s);
+    } catch (e) {
+      console.warn(`[MCP] 连接 ${server.name || server.url} 失败:`, e.message);
+      const s = mcpSessionState.get(server.id) || {};
+      s.tools = [];
+      s.error = e.message;
+      mcpSessionState.set(server.id, s);
+    }
+  }
+}
+
+// 将 MCP + Skills 远程工具转换成 OpenAI function tool 格式
+function buildDynamicTools() {
+  const extraTools = [];
+
+  // Skills → tools
+  for (const skill of config.skills || []) {
+    if (!skill.enabled || !skill.name) continue;
+    const params = skill.parameters || { type: "object", properties: {} };
+    extraTools.push({
+      type: "function",
+      function: {
+        name: `skill_${skill.name}`,
+        description: skill.description || skill.name,
+        parameters: params,
+      },
+      _source: "skill",
+      _skillId: skill.id,
+    });
+  }
+
+  // MCP → tools
+  mcpToolNameMap.clear();
+  for (const server of config.mcpServers || []) {
+    if (!server.enabled) continue;
+    const session = mcpSessionState.get(server.id);
+    if (!session?.tools) continue;
+    for (const tool of session.tools) {
+      const registeredName = toSafeMcpToolName(server.id, tool.name);
+      mcpToolNameMap.set(registeredName, { serverId: server.id, toolName: tool.name });
+      extraTools.push({
+        type: "function",
+        function: {
+          name: registeredName,
+          description: `[${server.name || "MCP"}] ${tool.description || tool.name}`,
+          parameters: tool.inputSchema || { type: "object", properties: {} },
+        },
+        _source: "mcp",
+        _serverId: server.id,
+        _mcpToolName: tool.name,
+      });
+    }
+  }
+
+  return extraTools;
+}
+
+// ============================================================
+// Skills 技能执行器
+// 支持 javascript（页面执行）和 http（HTTP 请求）两种类型
+// ============================================================
+async function executeSkill(tabId, skill, args) {
+  try {
+    switch (skill.type) {
+      case "javascript": {
+        // 在页面上下文中执行预设 JS 代码
+        let code = skill.config?.code || "";
+        // 将参数注入为 __args 变量
+        code = `(function(__args){ ${code} })(${JSON.stringify(args)})`;
+        const results = await chrome.tabs.sendMessage(tabId, {
+          type: "EXECUTE_TOOL",
+          tool: "evaluate_js",
+          args: { code },
+        });
+        return results;
+      }
+
+      case "http": {
+        const cfg = skill.config || {};
+        let url = cfg.url || "";
+        let body = cfg.bodyTemplate || "";
+        let headers = { ...(cfg.headers || {}) };
+
+        // 简单模板替换：{{key}} → args.key
+        const replaceTpl = (str) =>
+          str.replace(/\{\{(\w+)\}\}/g, (_, k) => (args[k] !== undefined ? String(args[k]) : ""));
+        url = replaceTpl(url);
+        body = replaceTpl(body);
+        for (const [hk, hv] of Object.entries(headers)) {
+          headers[hk] = replaceTpl(hv);
+        }
+
+        const method = (cfg.method || "GET").toUpperCase();
+        const fetchOpts = { method, headers };
+        if (method !== "GET" && method !== "HEAD" && body) {
+          fetchOpts.body = body;
+          if (!headers["Content-Type"]) headers["Content-Type"] = "application/json";
+        }
+
+        const res = await fetch(url, fetchOpts);
+        const text = await res.text();
+        let result;
+        try { result = JSON.parse(text); } catch { result = text; }
+        return { success: res.ok, status: res.status, data: result };
+      }
+
+      default:
+        return { success: false, error: `未知技能类型: ${skill.type}` };
+    }
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+}
+
+// 统一工具执行路由
 async function executeTool(tabId, name, args) {
   try {
+    // 路由 Skill 调用
+    if (name.startsWith("skill_")) {
+      const skillName = name.slice(6);
+      const skill = (config.skills || []).find(s => s.name === skillName && s.enabled);
+      if (!skill) return { success: false, error: `未找到技能: ${skillName}` };
+      return await executeSkill(tabId, skill, args);
+    }
+
+    // 路由 MCP 调用（通过查找表获取 serverId / toolName，避免下划线歧义）
+    if (name.startsWith("mcp_")) {
+      const mapping = mcpToolNameMap.get(name);
+      if (!mapping) return { success: false, error: `无效 MCP 工具名: ${name}` };
+      const { serverId, toolName } = mapping;
+      const server = (config.mcpServers || []).find(s => s.id === serverId && s.enabled);
+      if (!server) return { success: false, error: `MCP 服务器未找到或未启用: ${serverId}` };
+      const result = await mcpCallTool(server, toolName, args);
+      // MCP 工具返回 content 数组 [{type:"text",text:"..."}]
+      if (result?.content) {
+        const textParts = result.content.filter(c => c.type === "text").map(c => c.text);
+        return { success: !result.isError, data: textParts.join("\n") || result.content };
+      }
+      return { success: true, data: result };
+    }
+
+    // 内置工具
     switch (name) {
       case "navigate":
         await chrome.tabs.update(tabId, { url: args.url });
-        // 等待页面加载
         await new Promise((resolve) => {
           const listener = (id, changeInfo) => {
             if (id === tabId && changeInfo.status === "complete") {
@@ -608,7 +1019,6 @@ async function executeTool(tabId, name, args) {
             }
           };
           chrome.tabs.onUpdated.addListener(listener);
-          // 超时 15 秒
           setTimeout(() => {
             chrome.tabs.onUpdated.removeListener(listener);
             resolve();
@@ -624,7 +1034,6 @@ async function executeTool(tabId, name, args) {
         return { success: true, screenshot: dataUrl };
 
       default:
-        // 发送到 content script 执行
         const results = await chrome.tabs.sendMessage(tabId, {
           type: "EXECUTE_TOOL",
           tool: name,
@@ -641,6 +1050,11 @@ async function executeTool(tabId, name, args) {
 async function runAgent(tabId, rawUserInput, sendUpdate) {
   // 每次运行前重新加载配置，防止 service worker 重启后丢失内存中的配置
   await loadConfig();
+
+  // 刷新 MCP 工具列表（静默失败）
+  if ((config.mcpServers || []).some(s => s.enabled)) {
+    await refreshMcpTools().catch(e => console.warn("[MCP] 刷新失败:", e.message));
+  }
 
   if (!config.apiKey) {
     sendUpdate({
@@ -720,7 +1134,13 @@ async function runAgent(tabId, rawUserInput, sendUpdate) {
       // 执行所有工具调用
       for (const toolCall of assistantMessage.tool_calls) {
         const funcName = toolCall.function.name;
-        const funcArgs = JSON.parse(toolCall.function.arguments);
+        let funcArgs = {};
+        try {
+          const rawArgs = toolCall?.function?.arguments;
+          funcArgs = rawArgs ? JSON.parse(rawArgs) : {};
+        } catch {
+          funcArgs = {};
+        }
 
         sendUpdate({
           type: "tool_call",
@@ -968,6 +1388,45 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     chrome.tabs.query({ active: true, currentWindow: true }).then((tabs) => {
       sendResponse({ tabId: tabs[0]?.id });
     });
+    return true;
+  }
+
+  // 刷新 MCP 工具列表
+  if (message.type === "REFRESH_MCP") {
+    const requestServers = normalizeMcpServers(message.servers);
+    const serversForRefresh = requestServers.length > 0 ? requestServers : null;
+
+    loadConfig().then(() => refreshMcpTools(serversForRefresh)).then(() => {
+      const sourceServers = serversForRefresh || config.mcpServers || [];
+      const results = {};
+      for (const server of sourceServers) {
+        if (!server?.id) continue;
+        const session = mcpSessionState.get(server.id);
+        results[server.id] = {
+          tools: (session?.tools || []).map(t => ({
+            name: t.name,
+            description: t.description || '',
+          })),
+          error: session?.error || null,
+          count: session?.tools?.length || 0,
+        };
+      }
+
+      const hasAnyServer = sourceServers.length > 0;
+      const hasAnyError = Object.values(results).some(v => !!v?.error);
+      if (!hasAnyServer) {
+        sendResponse({ ok: false, error: "未检测到可用 MCP 服务器配置", results });
+        return;
+      }
+
+      if (hasAnyError) {
+        const firstError = Object.values(results).find(v => !!v?.error)?.error || "MCP 刷新失败";
+        sendResponse({ ok: false, error: firstError, results });
+        return;
+      }
+
+      sendResponse({ ok: true, results });
+    }).catch(e => sendResponse({ ok: false, error: getErrorMessage(e) }));
     return true;
   }
 });

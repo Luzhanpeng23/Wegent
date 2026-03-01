@@ -1,4 +1,6 @@
 import { useState, useEffect } from 'react'
+import SkillsManager from './SkillsManager'
+import McpManager from './McpManager'
 
 const THEME_OPTIONS = [
   { value: 'azure', label: '雾蓝', color: '#2f6fed' },
@@ -17,6 +19,8 @@ export default function SettingsPanel({ config, onSave, onCancel, theme, onTheme
     temperature: 0.7,
     topP: 1,
     systemPrompt: '',
+    skills: [],
+    mcpServers: [],
     multimodal: {
       enabled: true,
       modelSupportsVision: true,
@@ -45,6 +49,8 @@ export default function SettingsPanel({ config, onSave, onCancel, theme, onTheme
         temperature: config.temperature ?? 0.7,
         topP: config.topP ?? 1,
         systemPrompt: config.systemPrompt || '',
+        skills: Array.isArray(config.skills) ? config.skills : [],
+        mcpServers: Array.isArray(config.mcpServers) ? config.mcpServers : [],
         multimodal: {
           enabled: config.multimodal?.enabled ?? true,
           modelSupportsVision: config.multimodal?.modelSupportsVision ?? true,
@@ -84,6 +90,8 @@ export default function SettingsPanel({ config, onSave, onCancel, theme, onTheme
       maxTokens: parseInt(form.maxTokens) || 4096,
       temperature: parseFloat(form.temperature) ?? 0.7,
       topP: parseFloat(form.topP) ?? 1,
+      skills: form.skills,
+      mcpServers: form.mcpServers,
       multimodal: {
         ...form.multimodal,
         enabled: !!form.multimodal.enabled,
@@ -416,6 +424,16 @@ export default function SettingsPanel({ config, onSave, onCancel, theme, onTheme
             </div>
           </div>
         </section>
+
+        <SkillsManager
+          skills={form.skills}
+          onChange={(skills) => setForm(prev => ({ ...prev, skills }))}
+        />
+
+        <McpManager
+          servers={form.mcpServers}
+          onChange={(mcpServers) => setForm(prev => ({ ...prev, mcpServers }))}
+        />
 
         <section className="settings-section-card">
           <div className="settings-section-title">系统提示词</div>

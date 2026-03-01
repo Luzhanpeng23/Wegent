@@ -2,13 +2,13 @@
 // Cloudflare Turnstile 自动点击 - 统一脚本
 // MAIN world：劫持 attachShadow，捕获 checkbox 位置比例并 postMessage
 // ISOLATED world（chrome.runtime 可用）：转发 postMessage 到 background
+// 参考：cf-autoclick-master
 // ============================================================
 
-// 仅在 Cloudflare Turnstile challenge iframe 内执行
 if (window.top !== window.self && window.location.href.includes('challenges.cloudflare.com')) {
 
   if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.id) {
-    // ---- ISOLATED world：侦听 MAIN world 的 postMessage，转发给 background ----
+    // ---- ISOLATED world ----
     window.addEventListener('message', (event) => {
       if (event.source === window && event.data && event.data.type === 'CHECKBOX_POSITION_RATIO') {
         const { xRatio, yRatio } = event.data.payload;
@@ -24,84 +24,99 @@ if (window.top !== window.self && window.location.href.includes('challenges.clou
     }, false);
 
   } else {
-    // ---- MAIN world：劫持 attachShadow，捕获 checkbox 位置并 postMessage ----
+    // ---- MAIN world ----
     window.dtp = 1;
 
     function getRandomInt(min, max) {
       return Math.floor(Math.random() * (max - min + 1)) + min;
     }
 
-    const screenX = getRandomInt(800, 1200);
-    const screenY = getRandomInt(400, 600);
+    let screenX = getRandomInt(800, 1200);
+    let screenY = getRandomInt(400, 600);
     Object.defineProperty(MouseEvent.prototype, 'screenX', { value: screenX });
     Object.defineProperty(MouseEvent.prototype, 'screenY', { value: screenY });
 
     function runInjectionLogic() {
+      // 通过隐藏 iframe 获取绝对干净的原生 attachShadow，防止被其他扩展污染
       function getNativeAttachShadow() {
         try {
           const iframe = document.createElement('iframe');
           iframe.style.display = 'none';
           document.body.appendChild(iframe);
-          const native = iframe.contentWindow.Element.prototype.attachShadow;
+          const nativeAttachShadow = iframe.contentWindow.Element.prototype.attachShadow;
           document.body.removeChild(iframe);
-          return native;
+          return nativeAttachShadow;
         } catch (e) {
-          console.error('[CF] Failed to get native attachShadow:', e);
+          console.error('[CF] Failed to create iframe for native function extraction:', e);
           return null;
         }
       }
 
       try {
         const originalAttachShadow = getNativeAttachShadow();
-        if (!originalAttachShadow) return;
+        if (!originalAttachShadow) {
+          console.error('[CF] Aborting: Could not retrieve native attachShadow.');
+          return;
+        }
 
         Element.prototype.attachShadow = function (...args) {
           const shadowRoot = originalAttachShadow.apply(this, args);
           if (shadowRoot) {
-            const existing = shadowRoot.querySelector('input[type="checkbox"]');
-            if (existing) {
-              window.mySecretCheckbox = existing;
+            const existingCheckbox = shadowRoot.querySelector('input[type="checkbox"]');
+            if (existingCheckbox) {
+              window.mySecretCheckbox = existingCheckbox;
             } else {
-              const obs = new MutationObserver((_, o) => {
-                const cb = shadowRoot.querySelector('input[type="checkbox"]');
-                if (cb) { window.mySecretCheckbox = cb; o.disconnect(); }
+              const observer = new MutationObserver((mutations, obs) => {
+                const checkbox = shadowRoot.querySelector('input[type="checkbox"]');
+                if (checkbox) {
+                  window.mySecretCheckbox = checkbox;
+                  obs.disconnect();
+                }
               });
-              obs.observe(shadowRoot, { childList: true, subtree: true });
+              observer.observe(shadowRoot, { childList: true, subtree: true });
             }
           }
           return shadowRoot;
         };
       } catch (e) {
-        console.error('[CF] Error overriding attachShadow:', e);
+        console.error('[CF] Error during prototype override:', e);
       }
     }
 
     if (document.body) {
       runInjectionLogic();
     } else {
-      const obs = new MutationObserver(() => {
-        if (document.body) { runInjectionLogic(); obs.disconnect(); }
+      const observer = new MutationObserver(() => {
+        if (document.body) {
+          runInjectionLogic();
+          observer.disconnect();
+        }
       });
-      obs.observe(document.documentElement, { childList: true });
+      observer.observe(document.documentElement, { childList: true });
     }
 
-    (function pollAndReport() {
+    // 轮询 checkbox，找到后计算中心比例并发送给 ISOLATED world
+    (function pollAndReportCenterRatio() {
       if (window.mySecretCheckbox) {
-        const rect = window.mySecretCheckbox.getBoundingClientRect();
-        const w = window.innerWidth;
-        const h = window.innerHeight;
-        if (w > 0 && h > 0) {
+        const checkbox = window.mySecretCheckbox;
+        const rect = checkbox.getBoundingClientRect();
+        const windowWidth = window.innerWidth;
+        const windowHeight = window.innerHeight;
+
+        if (windowWidth > 0 && windowHeight > 0) {
+          const centerX = rect.left + rect.width / 2;
+          const centerY = rect.top + rect.height / 2;
+          const xRatio = centerX / windowWidth;
+          const yRatio = centerY / windowHeight;
+
           window.postMessage({
             type: 'CHECKBOX_POSITION_RATIO',
-            payload: {
-              xRatio: (rect.left + rect.width / 2) / w,
-              yRatio: (rect.top + rect.height / 2) / h,
-            }
+            payload: { xRatio, yRatio }
           }, '*');
         }
         try { delete window.mySecretCheckbox; } catch (e) {}
       } else {
-        setTimeout(pollAndReport, 200);
+        setTimeout(pollAndReportCenterRatio, 200);
       }
     })();
   }

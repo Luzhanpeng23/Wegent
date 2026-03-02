@@ -1978,8 +1978,43 @@ chrome.runtime.onInstalled.addListener(() => {
     .catch((error) => console.warn("[schedule] onInstalled 同步失败:", error?.message || error));
 });
 
+function extractReasoningDelta(delta) {
+  if (!delta || typeof delta !== "object") return "";
+
+  const flattenText = (value) => {
+    if (typeof value === "string") return value;
+    if (!Array.isArray(value)) return "";
+    return value
+      .map((item) => {
+        if (typeof item === "string") return item;
+        if (item && typeof item === "object") {
+          if (typeof item.text === "string") return item.text;
+          if (typeof item.content === "string") return item.content;
+        }
+        return "";
+      })
+      .filter(Boolean)
+      .join("");
+  };
+
+  const candidates = [
+    delta.reasoning,
+    delta.reasoning_content,
+    delta.reasoningContent,
+    delta.reasoning_text,
+    delta.reasoningText,
+  ];
+
+  for (const candidate of candidates) {
+    const text = flattenText(candidate);
+    if (typeof text === "string" && text.trim()) return text;
+  }
+
+  return "";
+}
+
 // ---- API 调用 ----
-async function callAPI(messages, { stream = false, onDelta, onToolCalls, skillContextMessage = "" } = {}) {
+async function callAPI(messages, { stream = false, onDelta, onReasoningDelta, onToolCalls, skillContextMessage = "" } = {}) {
   // 合并内置工具 + Skill Package 上下文 + MCP 动态工具
   const dynamicTools = buildDynamicTools();
   const allTools = [...TOOLS, ...dynamicTools.map(t => ({ type: t.type, function: t.function }))];
@@ -2022,6 +2057,7 @@ async function callAPI(messages, { stream = false, onDelta, onToolCalls, skillCo
   const decoder = new TextDecoder();
   let buffer = "";
   let contentAccum = "";
+  let reasoningAccum = "";
   // tool_calls 的增量合并结构: { index -> { id, type, function: { name, arguments } } }
   const toolCallsMap = {};
   let finishReason = null;
@@ -2057,6 +2093,13 @@ async function callAPI(messages, { stream = false, onDelta, onToolCalls, skillCo
       if (delta.content) {
         contentAccum += delta.content;
         if (onDelta) onDelta(delta.content, contentAccum);
+      }
+
+      // reasoning 增量
+      const reasoningDelta = extractReasoningDelta(delta);
+      if (reasoningDelta) {
+        reasoningAccum += reasoningDelta;
+        if (onReasoningDelta) onReasoningDelta(reasoningDelta, reasoningAccum);
       }
 
       // tool_calls 增量
@@ -2480,6 +2523,13 @@ async function runAgent(tabId, rawUserInput, sendUpdate) {
           sendUpdate({
             type: "assistant_delta",
             delta: delta,
+            content: full,
+          });
+        },
+        onReasoningDelta: (delta, full) => {
+          sendUpdate({
+            type: "reasoning_delta",
+            delta,
             content: full,
           });
         },

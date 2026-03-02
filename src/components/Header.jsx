@@ -1,4 +1,4 @@
-import { ArrowLeft, Bot, Clock3, Settings, Trash2 } from 'lucide-react'
+import { ArrowLeft, Bot, ListTodo, Settings, Trash2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 
@@ -37,7 +37,7 @@ export default function Header({
             {inSettings ? '设置中心' : inSchedule ? '定时任务' : 'Wegent'}
           </h1>
           <p className="truncate text-xs text-muted-foreground">
-            {inSettings ? '管理连接与模型参数' : inSchedule ? '自动发送任务消息' : '网页结构化操作面板'}
+            {inSettings ? '管理连接与模型参数' : inSchedule ? '自动发送任务消息' : 'Your Web, Automated.'}
           </p>
         </div>
       </div>
@@ -53,7 +53,7 @@ export default function Header({
               <Trash2 className="h-4 w-4" />
             </ActionButton>
             <ActionButton label="定时任务" onClick={onOpenSchedule}>
-              <Clock3 className="h-4 w-4" />
+              <ListTodo className="h-4 w-4" />
             </ActionButton>
             <ActionButton label="设置" onClick={onOpenSettings}>
               <Settings className="h-4 w-4" />

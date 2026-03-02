@@ -2,8 +2,8 @@ import { Camera, FileSearch, Link2, ScrollText } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
-import { ScrollArea } from '@/components/ui/scroll-area'
 import ToolCallCard from './ToolCallCard'
+import { Reasoning, ReasoningTrigger, ReasoningContent } from './ai-elements/reasoning'
 import { formatMarkdown } from '../utils/markdown'
 
 const SUGGESTIONS = [
@@ -22,13 +22,17 @@ function SuggestionIcon({ name }) {
 
 function WelcomeMessage({ onQuickSend }) {
   return (
-    <Card className="ml-2 gap-3 py-4">
+    <Card className="mx-2 gap-3 py-4">
       <div className="px-4">
-        <div className="mb-3 inline-flex h-9 w-9 items-center justify-center rounded-md border bg-muted text-primary">
-          <ScrollText className="h-4 w-4" />
+        <div className="mb-3 flex items-start gap-3">
+          <div className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md border bg-muted text-primary">
+            <ScrollText className="h-4 w-4" />
+          </div>
+          <div className="min-w-0">
+            <h2 className="text-sm font-semibold">开始一次结构化网页操作</h2>
+            <p className="mt-1 text-xs text-muted-foreground">直接输入目标，或从下面的快捷动作开始。</p>
+          </div>
         </div>
-        <h2 className="text-sm font-semibold">开始一次结构化网页操作</h2>
-        <p className="mt-1 text-xs text-muted-foreground">直接输入目标，或从下面的快捷动作开始。</p>
 
         <div className="mt-3 flex flex-wrap gap-2">
           {SUGGESTIONS.map((s) => (
@@ -52,9 +56,9 @@ function WelcomeMessage({ onQuickSend }) {
 
 function UserMessage({ text, attachments = [] }) {
   return (
-    <div className="flex justify-end">
-      <Card className="max-w-[88%] gap-2 border-primary/15 bg-primary py-2 text-primary-foreground">
-        <div className="px-3 text-sm leading-relaxed">{text || ''}</div>
+    <div className="flex justify-end overflow-x-hidden">
+      <Card className="min-w-0 max-w-[88%] gap-2 border-primary/15 bg-primary py-2 text-primary-foreground">
+        <div className="wrap-anywhere px-3 text-sm leading-relaxed whitespace-pre-wrap">{text || ''}</div>
         {attachments.length > 0 ? (
           <div className="flex flex-wrap gap-2 px-3 pb-1">
             {attachments.map((item) => (
@@ -77,10 +81,10 @@ function UserMessage({ text, attachments = [] }) {
 
 function AssistantMessage({ text, streaming }) {
   return (
-    <div className="flex justify-start">
-      <Card className="ml-2 max-w-[88%] gap-0 py-0">
+    <div className="flex justify-start overflow-x-hidden">
+      <Card className="ml-2 min-w-0 max-w-[88%] gap-0 overflow-hidden py-0">
         <div
-          className={`markdown-body px-3 py-2 text-sm leading-relaxed ${streaming ? 'streaming' : ''}`}
+          className={`markdown-body min-w-0 wrap-anywhere px-3 py-2 text-sm leading-relaxed ${streaming ? 'streaming' : ''}`}
           dangerouslySetInnerHTML={{ __html: formatMarkdown(text) }}
         />
       </Card>
@@ -90,25 +94,29 @@ function AssistantMessage({ text, streaming }) {
 
 function ErrorMessage({ text }) {
   return (
-    <div className="flex justify-start">
-      <Card className="ml-2 max-w-[88%] gap-0 border-destructive/30 bg-destructive/10 py-0 text-destructive">
-        <div className="px-3 py-2 text-sm">{text}</div>
+    <div className="flex justify-start overflow-x-hidden">
+      <Card className="ml-2 min-w-0 max-w-[88%] gap-0 border-destructive/30 bg-destructive/10 py-0 text-destructive">
+        <div className="wrap-anywhere px-3 py-2 text-sm whitespace-pre-wrap">{text}</div>
       </Card>
     </div>
   )
 }
 
-function ThinkingIndicator() {
+function ReasoningMessage({ text, streaming }) {
+  const content = typeof text === 'string' ? text : ''
+  const hasContent = content.trim().length > 0
+
   return (
-    <div className="flex justify-start">
-      <Card className="ml-2 inline-flex flex-row items-center gap-2 py-2 pl-3 pr-3">
-        <div className="flex gap-1">
-          <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-primary [animation-delay:-0.3s]" />
-          <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-primary [animation-delay:-0.15s]" />
-          <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-primary" />
-        </div>
-        <span className="text-xs text-muted-foreground">思考中...</span>
-      </Card>
+    <div className="flex justify-start overflow-x-hidden">
+      <div className="ml-2 min-w-0 w-full max-w-[88%]">
+        <Reasoning isStreaming={streaming} defaultOpen={streaming}>
+          <ReasoningTrigger
+            isStreaming={streaming}
+            getThinkingMessage={(isStreaming) => (isStreaming ? '思考中...' : '思考过程')}
+          />
+          {hasContent ? <ReasoningContent>{content}</ReasoningContent> : null}
+        </Reasoning>
+      </div>
     </div>
   )
 }
@@ -129,12 +137,12 @@ export default function ChatArea({ messages, chatEndRef, onQuickSend }) {
   const isEmpty = messages.length === 0
 
   return (
-    <main className="min-h-0 flex-1 bg-background">
-      <ScrollArea className="h-full">
+    <main className="flex min-h-0 flex-1 flex-col overflow-hidden bg-background">
+      <div className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto">
         <div className="space-y-3 px-3 py-3">
-          <div className="px-2">
+          {/* <div className="px-2">
             <Badge variant="secondary">会话</Badge>
-          </div>
+          </div> */}
 
           {isEmpty && <WelcomeMessage onQuickSend={onQuickSend} />}
 
@@ -147,7 +155,9 @@ export default function ChatArea({ messages, chatEndRef, onQuickSend }) {
               case 'error':
                 return <ErrorMessage key={msg.id} text={msg.content} />
               case 'thinking':
-                return <ThinkingIndicator key={msg.id} />
+                return <ReasoningMessage key={msg.id} text="" streaming />
+              case 'reasoning':
+                return <ReasoningMessage key={msg.id} text={msg.content} streaming={msg.streaming} />
               case 'tool_call':
                 return (
                   <ToolCallCard
@@ -169,7 +179,7 @@ export default function ChatArea({ messages, chatEndRef, onQuickSend }) {
 
           <div ref={chatEndRef} />
         </div>
-      </ScrollArea>
+      </div>
     </main>
   )
 }

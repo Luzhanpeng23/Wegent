@@ -252,7 +252,7 @@ export default function InputArea({ onSend, disabled, config }) {
           <Button
             type="button"
             size="icon-sm"
-            className="absolute right-2 bottom-2"
+            className="absolute top-1/2 right-2 -translate-y-1/2"
             onClick={handleSend}
             disabled={disabled || isPreparingImage || (!text.trim() && attachments.length === 0)}
           >

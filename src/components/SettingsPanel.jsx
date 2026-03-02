@@ -251,7 +251,7 @@ export default function SettingsPanel({ config, onSave, onCancel, onThemeModeCha
                   />
                 </div>
 
-                <div className="col-span-1 sm:col-span-2 grid grid-cols-1 gap-2 sm:grid-cols-[auto_96px] sm:items-center">
+                <div className="col-span-1 sm:col-span-2 grid grid-cols-[auto_96px] items-center gap-2">
                   <div className="flex items-center gap-2">
                     <Label htmlFor="mm-vision" className="text-xs">支持 Vision</Label>
                     <Switch

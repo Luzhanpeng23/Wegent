@@ -83,7 +83,7 @@ export default function ToolCallCard({ name, args, status, result, duration, ind
 
   return (
     <Collapsible open={expanded} onOpenChange={setExpanded}>
-      <Card className="ml-2 gap-0 overflow-hidden py-0">
+      <Card className="ml-2 min-w-0 max-w-[88%] gap-0 overflow-hidden py-0">
         <CollapsibleTrigger asChild>
           <button
             type="button"

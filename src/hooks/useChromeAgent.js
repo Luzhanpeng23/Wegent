@@ -39,6 +39,8 @@ export function useChromeAgent() {
   const [config, setConfig] = useState(isChromeExtension ? null : DEV_CONFIG)
   const toolCountRef = useRef(0)
 
+  const hasReasoningContent = (value) => typeof value === 'string' && value.trim().length > 0
+
   // 初始化：获取当前标签页和配置
   useEffect(() => {
     if (!isChromeExtension) return
@@ -83,7 +85,16 @@ export function useChromeAgent() {
           toolCountRef.current += 1
           setMessages(prev => {
             const filtered = prev.filter(m => m.type !== 'thinking')
-            return [...filtered, {
+            const normalized = [...filtered]
+            const last = normalized[normalized.length - 1]
+            if (last && last.type === 'reasoning' && last.streaming) {
+              normalized[normalized.length - 1] = {
+                ...last,
+                streaming: false,
+              }
+            }
+
+            return [...normalized, {
               type: 'tool_call',
               id: Date.now(),
               name: p.name,
@@ -124,22 +135,55 @@ export function useChromeAgent() {
           }])
           break
 
+        case 'reasoning_delta':
+          setMessages(prev => {
+            const filtered = prev.filter(m => m.type !== 'thinking')
+            const nextContent = p.content || p.delta || ''
+            if (!hasReasoningContent(nextContent)) return filtered
+
+            const last = filtered[filtered.length - 1]
+            if (last && last.type === 'reasoning' && last.streaming) {
+              const updated = [...filtered]
+              updated[updated.length - 1] = {
+                ...last,
+                content: nextContent,
+              }
+              return updated
+            }
+
+            return [...filtered, {
+              type: 'reasoning',
+              id: Date.now(),
+              content: nextContent,
+              streaming: true,
+            }]
+          })
+          break
+
         case 'assistant_delta':
           // 流式增量：累积更新最后一条 assistant 消息，或新建一条
           setMessages(prev => {
             const filtered = prev.filter(m => m.type !== 'thinking')
-            const last = filtered[filtered.length - 1]
+            const updated = [...filtered]
+            const lastItem = updated[updated.length - 1]
+
+            if (lastItem && lastItem.type === 'reasoning' && lastItem.streaming) {
+              updated[updated.length - 1] = {
+                ...lastItem,
+                streaming: false,
+              }
+            }
+
+            const last = updated[updated.length - 1]
             if (last && last.type === 'assistant' && last.streaming) {
-              // 更新已有 streaming 消息
-              const updated = [...filtered]
               updated[updated.length - 1] = {
                 ...last,
                 content: p.content || '',
               }
               return updated
             }
-            // 新建 streaming 消息
-            return [...filtered, {
+
+            return [...updated, {
               type: 'assistant',
               id: Date.now(),
               content: p.content || p.delta || '',
@@ -151,18 +195,29 @@ export function useChromeAgent() {
         case 'assistant_message':
           setMessages(prev => {
             const filtered = prev.filter(m => m.type !== 'thinking')
-            const last = filtered[filtered.length - 1]
-            // 如果最后一条是 streaming 消息，标记完成
+            const normalized = [...filtered]
+
+            for (let i = normalized.length - 1; i >= 0; i--) {
+              if (normalized[i].type === 'reasoning' && normalized[i].streaming) {
+                normalized[i] = {
+                  ...normalized[i],
+                  streaming: false,
+                }
+                break
+              }
+            }
+
+            const last = normalized[normalized.length - 1]
             if (last && last.type === 'assistant' && last.streaming) {
-              const updated = [...filtered]
-              updated[updated.length - 1] = {
+              normalized[normalized.length - 1] = {
                 ...last,
                 content: p.content || last.content || '',
                 streaming: false,
               }
-              return updated
+              return normalized
             }
-            return [...filtered, {
+
+            return [...normalized, {
               type: 'assistant',
               id: Date.now(),
               content: p.content || '',

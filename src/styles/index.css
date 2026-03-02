@@ -20,6 +20,9 @@
   --input: oklch(0.922 0 0);
   --ring: oklch(0.708 0 0);
   --radius: 0.625rem;
+  --scrollbar-track: color-mix(in oklab, var(--background) 92%, black 8%);
+  --scrollbar-thumb: color-mix(in oklab, var(--muted-foreground) 35%, transparent);
+  --scrollbar-thumb-hover: color-mix(in oklab, var(--muted-foreground) 55%, transparent);
 }
 
 .dark {
@@ -41,6 +44,9 @@
   --border: oklch(1 0 0 / 10%);
   --input: oklch(1 0 0 / 15%);
   --ring: oklch(0.556 0 0);
+  --scrollbar-track: color-mix(in oklab, var(--background) 84%, white 16%);
+  --scrollbar-thumb: color-mix(in oklab, var(--muted-foreground) 46%, transparent);
+  --scrollbar-thumb-hover: color-mix(in oklab, var(--muted-foreground) 64%, transparent);
 }
 
 @theme inline {
@@ -89,11 +95,35 @@
     height: 100%;
     overflow: hidden;
   }
+
+  *::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  *::-webkit-scrollbar-track {
+    background: var(--scrollbar-track);
+    border-radius: 9999px;
+  }
+
+  *::-webkit-scrollbar-thumb {
+    background: var(--scrollbar-thumb);
+    border-radius: 9999px;
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
+
+  *::-webkit-scrollbar-thumb:hover {
+    background: var(--scrollbar-thumb-hover);
+    background-clip: content-box;
+  }
 }
 
 .markdown-body {
   font-size: 13.5px;
   line-height: 1.65;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .markdown-body p {

@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
 import { TooltipProvider } from '@/components/ui/tooltip'
+import { Button } from '@/components/ui/button'
 import { useChromeAgent } from './hooks/useChromeAgent'
 import Header from './components/Header'
 import SettingsPanel from './components/SettingsPanel'
+import ScheduleManager from './components/ScheduleManager'
 import ChatArea from './components/ChatArea'
 import InputArea from './components/InputArea'
 
@@ -22,7 +24,7 @@ export default function App() {
     refreshSkillPackage,
   } = useChromeAgent()
 
-  const [view, setView] = useState('chat')
+  const [view, setView] = useState('chat') // chat | schedule | settings
   const [themeModePreview, setThemeModePreview] = useState(null)
   const [systemPrefersDark, setSystemPrefersDark] = useState(() => {
     if (typeof window === 'undefined' || !window.matchMedia) return false
@@ -30,7 +32,7 @@ export default function App() {
   })
   const chatEndRef = useRef(null)
 
-  const themeMode = themeModePreview || config?.themeMode || 'light'
+  const themeMode = themeModePreview || config?.themeMode || 'system'
   const resolvedDark = themeMode === 'dark' || (themeMode === 'system' && systemPrefersDark)
 
   useEffect(() => {
@@ -63,11 +65,29 @@ export default function App() {
         <Header
           view={view}
           onClear={clearConversation}
+          onOpenSchedule={() => setView('schedule')}
           onOpenSettings={() => setView('settings')}
           onBackToChat={() => setView('chat')}
         />
 
-        {view === 'settings' ? (
+        {view === 'schedule' ? (
+          <main className="flex min-h-0 flex-1 flex-col overflow-hidden bg-background">
+            <div className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto">
+              <div className="space-y-3 overflow-x-hidden p-3 pb-1">
+                <ScheduleManager
+                  tasks={Array.isArray(config?.scheduledTasks) ? config.scheduledTasks : []}
+                  onChange={(scheduledTasks) => {
+                    saveConfig({ scheduledTasks })
+                  }}
+                />
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-2 border-t bg-background px-3 py-2">
+              <Button type="button" variant="outline" onClick={() => setView('chat')}>返回对话</Button>
+            </div>
+          </main>
+        ) : view === 'settings' ? (
           <SettingsPanel
             config={config}
             onThemeModeChange={setThemeModePreview}

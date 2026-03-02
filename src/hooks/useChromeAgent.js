@@ -5,7 +5,7 @@ const isChromeExtension = typeof chrome !== 'undefined' && !!chrome.runtime?.id
 
 /** 非扩展环境下的默认配置（用于开发预览） */
 const DEV_CONFIG = {
-  schemaVersion: 2,
+  schemaVersion: 3,
   apiBase: 'https://api.openai.com/v1',
   apiKey: '',
   model: 'gpt-4o',
@@ -13,7 +13,7 @@ const DEV_CONFIG = {
   temperature: 0.7,
   topP: 1,
   maxTokens: 4096,
-  themeMode: 'light',
+  themeMode: 'system',
   multimodal: {
     modelSupportsVision: true,
     imageDetail: 'auto',
@@ -27,6 +27,7 @@ const DEV_CONFIG = {
     maxResourcesPerType: 50,
   },
   mcpServers: [],
+  scheduledTasks: [],
   systemPrompt: '',
 }
 
@@ -262,6 +263,7 @@ export function useChromeAgent() {
         ...((newConfig && newConfig.skillRuntime) || {}),
       },
       mcpServers: Array.isArray(newConfig?.mcpServers) ? newConfig.mcpServers : (prev?.mcpServers || []),
+      scheduledTasks: Array.isArray(newConfig?.scheduledTasks) ? newConfig.scheduledTasks : (prev?.scheduledTasks || []),
     }))
   }, [])
 

@@ -26,7 +26,7 @@ export default function SettingsPanel({ config, onSave, onCancel, onThemeModeCha
     temperature: 0.7,
     topP: 1,
     systemPrompt: '',
-    themeMode: 'light',
+    themeMode: 'system',
     skillPackages: [],
     mcpServers: [],
     multimodal: {
@@ -47,7 +47,7 @@ export default function SettingsPanel({ config, onSave, onCancel, onThemeModeCha
         temperature: config.temperature ?? 0.7,
         topP: config.topP ?? 1,
         systemPrompt: config.systemPrompt || '',
-        themeMode: config.themeMode || 'light',
+        themeMode: config.themeMode || 'system',
         skillPackages: Array.isArray(config.skillPackages) ? config.skillPackages : [],
         mcpServers: Array.isArray(config.mcpServers) ? config.mcpServers : [],
         multimodal: {
@@ -84,7 +84,7 @@ export default function SettingsPanel({ config, onSave, onCancel, onThemeModeCha
       maxTokens: parseInt(form.maxTokens) || 4096,
       temperature: parseFloat(form.temperature) ?? 0.7,
       topP: parseFloat(form.topP) ?? 1,
-      themeMode: ['light', 'dark', 'system'].includes(form.themeMode) ? form.themeMode : 'light',
+      themeMode: ['light', 'dark', 'system'].includes(form.themeMode) ? form.themeMode : 'system',
       skillPackages: form.skillPackages,
       mcpServers: form.mcpServers,
       multimodal: {

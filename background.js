@@ -6,7 +6,7 @@ import {
 } from "./src/utils/skillParser.js";
 
 // ============================================================
-// DOM Agent - Background Service Worker
+// Wegent - Background Service Worker
 // 负责与 OpenAI 兼容 API 通信，协调 content script 执行操作
 // ============================================================
 
@@ -33,7 +33,7 @@ const DEFAULT_SKILL_RUNTIME = {
 };
 
 const DEFAULT_CONFIG = {
-  schemaVersion: 2,
+  schemaVersion: 3,
   apiBase: "https://api.openai.com/v1",
   apiKey: "",
   model: "gpt-4o",
@@ -47,6 +47,8 @@ const DEFAULT_CONFIG = {
   skillRuntime: { ...DEFAULT_SKILL_RUNTIME },
   // MCP 远程服务器列表
   mcpServers: [],
+  // 定时消息任务
+  scheduledTasks: [],
   systemPrompt: `你是一个浏览器操作助手。用户会用自然语言描述他们想在当前网页上执行的操作，你需要通过调用工具来完成这些操作。
 
 操作前请先使用 get_page_info 了解当前页面状态，然后根据需要使用 get_elements 获取页面元素信息。
@@ -289,6 +291,8 @@ let config = {
 };
 let conversations = new Map(); // tabId -> messages[]
 const skillReferenceCache = new Map(); // key -> { text, expiresAt }
+const runningScheduledTaskIds = new Set();
+const SCHEDULE_ALARM_PREFIX = "scheduled_task:";
 
 function normalizeMcpServer(server, fallbackId = "") {
   if (!server || typeof server !== "object") return null;
@@ -434,6 +438,65 @@ function normalizeSkillPackages(raw) {
   return normalized;
 }
 
+function normalizeScheduledTasks(raw) {
+  if (!Array.isArray(raw)) return [];
+  const now = Date.now();
+  const isoNow = new Date(now).toISOString();
+
+  return raw
+    .map((item, idx) => {
+      if (!item || typeof item !== "object") return null;
+
+      const id = String(item.id || `st_${idx}_${Date.now().toString(36)}`).trim();
+      if (!id) return null;
+
+      const name = String(item.name || "").trim() || "未命名定时任务";
+      const prompt = String(item.prompt || "").trim();
+      if (!prompt) return null;
+
+      const triggerRaw = item.trigger && typeof item.trigger === "object" ? item.trigger : {};
+      const triggerType = triggerRaw.type === "once" ? "once" : "interval";
+      const trigger = { type: triggerType };
+
+      if (triggerType === "once") {
+        const runAtMs = Number.isFinite(Date.parse(triggerRaw.runAt)) ? Date.parse(triggerRaw.runAt) : NaN;
+        if (!Number.isFinite(runAtMs)) return null;
+        trigger.runAt = new Date(runAtMs).toISOString();
+      } else {
+        const intervalMinutes = Math.floor(clampNumber(triggerRaw.intervalMinutes, 1, 1, 24 * 60));
+        trigger.intervalMinutes = intervalMinutes;
+      }
+
+      const stateRaw = item.state && typeof item.state === "object" ? item.state : {};
+      const validStatus = new Set(["idle", "scheduled", "running", "success", "failed", "skipped"]);
+      const status = validStatus.has(stateRaw.status) ? stateRaw.status : "idle";
+
+      const normalizeIso = (value) => {
+        const t = Date.parse(value);
+        return Number.isFinite(t) ? new Date(t).toISOString() : undefined;
+      };
+
+      return {
+        id,
+        name,
+        enabled: item.enabled !== false,
+        prompt,
+        trigger,
+        state: {
+          status,
+          nextRunAt: normalizeIso(stateRaw.nextRunAt),
+          lastRunAt: normalizeIso(stateRaw.lastRunAt),
+          lastError: typeof stateRaw.lastError === "string" ? stateRaw.lastError : "",
+          totalRuns: Math.max(0, Math.floor(Number(stateRaw.totalRuns) || 0)),
+          totalFailures: Math.max(0, Math.floor(Number(stateRaw.totalFailures) || 0)),
+        },
+        createdAt: normalizeIso(item.createdAt) || isoNow,
+        updatedAt: normalizeIso(item.updatedAt) || isoNow,
+      };
+    })
+    .filter(Boolean);
+}
+
 function mergeConfig(baseConfig = {}) {
   return {
     ...DEFAULT_CONFIG,
@@ -446,6 +509,7 @@ function mergeConfig(baseConfig = {}) {
     skillPackages: normalizeSkillPackages(baseConfig.skillPackages),
     skillRuntime: normalizeSkillRuntime(baseConfig.skillRuntime),
     mcpServers: normalizeMcpServers(baseConfig.mcpServers),
+    scheduledTasks: normalizeScheduledTasks(baseConfig.scheduledTasks),
   };
 }
 
@@ -1597,7 +1661,8 @@ async function loadConfig() {
 }
 
 // 保存配置
-async function saveConfig(newConfig) {
+async function saveConfig(newConfig, options = {}) {
+  const { syncScheduledAlarms = true } = options;
   const merged = {
     ...config,
     ...(newConfig || {}),
@@ -1609,6 +1674,252 @@ async function saveConfig(newConfig) {
 
   config = mergeConfig(merged);
   await chrome.storage.local.set({ domAgentConfig: config });
+
+  if (syncScheduledAlarms) {
+    await reconcileScheduledAlarms();
+  }
+}
+
+function buildScheduledAlarmName(taskId) {
+  return `${SCHEDULE_ALARM_PREFIX}${taskId}`;
+}
+
+function parseScheduledTaskIdFromAlarmName(name = "") {
+  const raw = String(name || "");
+  if (!raw.startsWith(SCHEDULE_ALARM_PREFIX)) return "";
+  return raw.slice(SCHEDULE_ALARM_PREFIX.length).trim();
+}
+
+async function getActiveTabIdForScheduledRun() {
+  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (tabs[0]?.id) return tabs[0].id;
+
+  const fallbackTabs = await chrome.tabs.query({ active: true });
+  if (fallbackTabs[0]?.id) return fallbackTabs[0].id;
+
+  throw new Error("当前没有可用的活动标签页");
+}
+
+async function persistScheduledTasks(nextTasks, options = {}) {
+  const { syncScheduledAlarms = false } = options;
+  config = mergeConfig({
+    ...config,
+    scheduledTasks: Array.isArray(nextTasks) ? nextTasks : [],
+  });
+  await chrome.storage.local.set({ domAgentConfig: config });
+  if (syncScheduledAlarms) {
+    await reconcileScheduledAlarms();
+  }
+}
+
+async function patchScheduledTask(taskId, updater, options = {}) {
+  const { syncScheduledAlarms = false } = options;
+  const tasks = Array.isArray(config.scheduledTasks) ? config.scheduledTasks : [];
+  const idx = tasks.findIndex(item => item.id === taskId);
+  if (idx < 0) return null;
+
+  const current = tasks[idx];
+  const next = typeof updater === "function" ? updater(current) : current;
+  if (!next || typeof next !== "object") return null;
+
+  const updatedTasks = [...tasks];
+  updatedTasks[idx] = next;
+  await persistScheduledTasks(updatedTasks, { syncScheduledAlarms });
+  return updatedTasks[idx];
+}
+
+async function reconcileScheduledAlarms() {
+  const tasks = Array.isArray(config.scheduledTasks) ? config.scheduledTasks : [];
+  const existingAlarms = await chrome.alarms.getAll();
+  const scheduleAlarms = existingAlarms.filter(alarm => alarm.name?.startsWith(SCHEDULE_ALARM_PREFIX));
+  const alarmByName = new Map(scheduleAlarms.map(alarm => [alarm.name, alarm]));
+  const desiredAlarmNames = new Set();
+
+  const now = Date.now();
+  let changed = false;
+  const nextTasks = tasks.map(task => {
+    const state = task?.state && typeof task.state === "object" ? task.state : {};
+    return {
+      ...task,
+      state: {
+        ...state,
+      },
+    };
+  });
+
+  for (const task of nextTasks) {
+    const alarmName = buildScheduledAlarmName(task.id);
+
+    if (!task.enabled) {
+      if (task.state?.nextRunAt) {
+        task.state.nextRunAt = undefined;
+        changed = true;
+      }
+      continue;
+    }
+
+    const trigger = task.trigger && typeof task.trigger === "object" ? task.trigger : { type: "interval", intervalMinutes: 1 };
+    desiredAlarmNames.add(alarmName);
+    const existing = alarmByName.get(alarmName);
+
+    if (trigger.type === "once") {
+      const runAtMs = Date.parse(trigger.runAt || "");
+      if (!Number.isFinite(runAtMs)) {
+        task.enabled = false;
+        task.state.status = "failed";
+        task.state.lastError = "无效的执行时间";
+        task.state.nextRunAt = undefined;
+        task.updatedAt = new Date().toISOString();
+        changed = true;
+        desiredAlarmNames.delete(alarmName);
+        continue;
+      }
+
+      const targetWhen = Math.max(now + 800, runAtMs);
+      const needCreate = !existing || Number(existing.periodInMinutes) > 0 || Math.abs((existing.scheduledTime || 0) - targetWhen) > 1000;
+      if (needCreate) {
+        await chrome.alarms.clear(alarmName);
+        chrome.alarms.create(alarmName, { when: targetWhen });
+      }
+
+      const nextRunAt = new Date(targetWhen).toISOString();
+      if (task.state.nextRunAt !== nextRunAt) {
+        task.state.nextRunAt = nextRunAt;
+        changed = true;
+      }
+      if (task.state.status !== "running" && task.state.status !== "scheduled") {
+        task.state.status = "scheduled";
+        changed = true;
+      }
+      continue;
+    }
+
+    const intervalMinutes = Math.floor(clampNumber(trigger.intervalMinutes, 1, 1, 24 * 60));
+    const needCreate = !existing || Math.floor(existing.periodInMinutes || 0) !== intervalMinutes;
+    if (needCreate) {
+      await chrome.alarms.clear(alarmName);
+      chrome.alarms.create(alarmName, {
+        delayInMinutes: intervalMinutes,
+        periodInMinutes: intervalMinutes,
+      });
+    }
+
+    const nextRunAt = (!needCreate && existing?.scheduledTime)
+      ? new Date(existing.scheduledTime).toISOString()
+      : new Date(now + intervalMinutes * 60 * 1000).toISOString();
+
+    if (task.state.nextRunAt !== nextRunAt) {
+      task.state.nextRunAt = nextRunAt;
+      changed = true;
+    }
+    if (task.state.status !== "running" && task.state.status !== "scheduled") {
+      task.state.status = "scheduled";
+      changed = true;
+    }
+  }
+
+  for (const alarm of scheduleAlarms) {
+    if (!desiredAlarmNames.has(alarm.name)) {
+      await chrome.alarms.clear(alarm.name);
+    }
+  }
+
+  if (changed) {
+    await persistScheduledTasks(nextTasks, { syncScheduledAlarms: false });
+  }
+}
+
+function emitAgentUpdate(update) {
+  chrome.runtime.sendMessage({ type: "AGENT_UPDATE", payload: update }).catch(() => {});
+}
+
+async function runScheduledTask(taskId) {
+  await loadConfig();
+  const task = (config.scheduledTasks || []).find(item => item.id === taskId);
+  if (!task || !task.enabled) return;
+
+  const nowIso = new Date().toISOString();
+
+  if (runningScheduledTaskIds.has(taskId)) {
+    await patchScheduledTask(taskId, current => ({
+      ...current,
+      state: {
+        ...(current.state || {}),
+        status: "skipped",
+        lastRunAt: nowIso,
+        lastError: "上一轮任务尚未结束，本轮已跳过",
+      },
+      updatedAt: nowIso,
+    }));
+    return;
+  }
+
+  runningScheduledTaskIds.add(taskId);
+
+  try {
+    await patchScheduledTask(taskId, current => ({
+      ...current,
+      state: {
+        ...(current.state || {}),
+        status: "running",
+        lastError: "",
+      },
+      updatedAt: nowIso,
+    }));
+
+    let status = "success";
+    let lastError = "";
+
+    try {
+      if (!config.apiKey) {
+        throw new Error("请先在设置中配置 API Key");
+      }
+
+      const tabId = await getActiveTabIdForScheduledRun();
+      let runtimeError = "";
+      await runAgent(tabId, { text: task.prompt, attachments: [] }, (update) => {
+        emitAgentUpdate(update);
+        if (!runtimeError && update?.type === "error") {
+          runtimeError = String(update.message || "任务执行失败");
+        }
+      });
+
+      if (runtimeError) {
+        status = "failed";
+        lastError = runtimeError;
+      }
+    } catch (error) {
+      status = "failed";
+      lastError = getErrorMessage(error);
+    }
+
+    const completedAt = new Date().toISOString();
+
+    await patchScheduledTask(taskId, current => {
+      const trigger = current.trigger && typeof current.trigger === "object" ? current.trigger : { type: "interval", intervalMinutes: 1 };
+      const intervalMinutes = Math.floor(clampNumber(trigger.intervalMinutes, 1, 1, 24 * 60));
+      const isOnce = trigger.type === "once";
+
+      return {
+        ...current,
+        enabled: isOnce ? false : current.enabled,
+        state: {
+          ...(current.state || {}),
+          status,
+          lastRunAt: completedAt,
+          lastError,
+          totalRuns: Math.max(0, Math.floor(Number(current.state?.totalRuns) || 0)) + 1,
+          totalFailures: Math.max(0, Math.floor(Number(current.state?.totalFailures) || 0)) + (status === "failed" ? 1 : 0),
+          nextRunAt: isOnce
+            ? undefined
+            : new Date(Date.now() + intervalMinutes * 60 * 1000).toISOString(),
+        },
+        updatedAt: completedAt,
+      };
+    }, { syncScheduledAlarms: task.trigger?.type === "once" });
+  } finally {
+    runningScheduledTaskIds.delete(taskId);
+  }
 }
 
 // ---- 点击侧边栏按钮时打开侧边栏 ----
@@ -1645,6 +1956,26 @@ chrome.runtime.onConnect.addListener((port) => {
       sidePanelOpen = false;
     });
   }
+});
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  const taskId = parseScheduledTaskIdFromAlarmName(alarm?.name);
+  if (!taskId) return;
+  runScheduledTask(taskId).catch((error) => {
+    console.error("[schedule] 定时任务执行失败:", error);
+  });
+});
+
+chrome.runtime.onStartup.addListener(() => {
+  loadConfig()
+    .then(() => reconcileScheduledAlarms())
+    .catch((error) => console.warn("[schedule] onStartup 同步失败:", error?.message || error));
+});
+
+chrome.runtime.onInstalled.addListener(() => {
+  loadConfig()
+    .then(() => reconcileScheduledAlarms())
+    .catch((error) => console.warn("[schedule] onInstalled 同步失败:", error?.message || error));
 });
 
 // ---- API 调用 ----
@@ -1932,7 +2263,7 @@ async function mcpInitialize(server) {
         const result = await mcpRequest(server, "initialize", {
           protocolVersion,
           capabilities,
-          clientInfo: { name: "DOM Agent", version: "1.0.0" },
+          clientInfo: { name: "Wegent", version: "1.0.0" },
         }, { useSession: false });
 
         // 发送 initialized 通知
@@ -2410,7 +2741,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === "SAVE_CONFIG") {
-    saveConfig(message.config).then(() => sendResponse({ ok: true }));
+    saveConfig(message.config)
+      .then(() => sendResponse({ ok: true }))
+      .catch(error => sendResponse({ ok: false, error: getErrorMessage(error) }));
     return true;
   }
 
@@ -2645,4 +2978,4 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 });
 
 // 初始化
-loadConfig();
+loadConfig().then(() => reconcileScheduledAlarms()).catch(() => {});

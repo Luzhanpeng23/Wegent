@@ -1,7 +1,7 @@
 <table>
   <tr>
     <td width="190" align="center" valign="middle">
-      <img src="./1.png" alt="Wegent Logo" width="150" />
+      <img src="./image/README/logo.png" alt="Wegent Logo" width="150" />
     </td>
     <td align="left" valign="middle">
       <h1>Wegent</h1>

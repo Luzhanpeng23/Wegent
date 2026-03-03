@@ -36,8 +36,8 @@ const DEFAULT_CONFIG = {
   schemaVersion: 3,
   apiBase: "https://api.openai.com/v1",
   apiKey: "",
-  model: "gpt-4o",
-  maxLoops: 99,
+  model: "gpt-5.2",
+  maxLoops: 60,
   temperature: 0.9,
   topP: 1,
   maxTokens: 8192,
@@ -49,7 +49,7 @@ const DEFAULT_CONFIG = {
   mcpServers: [],
   // 定时消息任务
   scheduledTasks: [],
-  systemPrompt: `你是一个运行在浏览器扩展中的通用Agent。通过灵活调用工具来完成用户要求的复杂任务。
+  systemPrompt: `你是一个运行在浏览器扩展中的通用Agent。通过灵活调用工具控制浏览器并结合使用远程工具和skill来完成用户要求的复杂任务。
 
 如果涉及浏览器操作，请先使用 get_page_info 了解当前页面状态，然后根据需要使用 get_elements 获取页面元素信息。
 执行完操作后，简要向用户反馈操作结果。

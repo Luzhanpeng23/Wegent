@@ -1,9 +1,34 @@
 import { marked } from 'marked'
+import hljs from 'highlight.js/lib/common'
 
 // 配置 marked
 marked.setOptions({
   gfm: true,          // GitHub 风格 Markdown
   breaks: true,       // 换行符转 <br>
+})
+
+marked.use({
+  renderer: {
+    code({ text, lang }) {
+      const raw = typeof text === 'string' ? text : ''
+      const language = (lang || '').trim().toLowerCase().split(/[\s,]+/)[0]
+      const canHighlight = language && hljs.getLanguage(language)
+
+      try {
+        const highlighted = canHighlight
+          ? hljs.highlight(raw, { language, ignoreIllegals: true }).value
+          : hljs.highlightAuto(raw).value
+
+        const cls = canHighlight
+          ? ` class="hljs language-${escapeHtml(language)}"`
+          : ' class="hljs"'
+
+        return `<pre><code${cls}>${highlighted}</code></pre>`
+      } catch {
+        return `<pre><code class="hljs">${escapeHtml(raw)}</code></pre>`
+      }
+    },
+  },
 })
 
 /** Markdown -> HTML（安全转换） */

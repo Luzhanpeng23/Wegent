@@ -9,8 +9,7 @@
     "tabs",
     "sidePanel",
     "storage",
-    "alarms",
-    "debugger"
+    "alarms"
   ],
   "host_permissions": [
     "<all_urls>"
@@ -24,19 +23,6 @@
       "matches": ["<all_urls>"],
       "js": ["content.js"],
       "run_at": "document_idle"
-    },
-    {
-      "matches": ["<all_urls>"],
-      "js": ["cf-main.js"],
-      "world": "MAIN",
-      "run_at": "document_start",
-      "all_frames": true
-    },
-    {
-      "matches": ["<all_urls>"],
-      "js": ["cf-isolated.js"],
-      "run_at": "document_start",
-      "all_frames": true
     }
   ],
   "side_panel": {

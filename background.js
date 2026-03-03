@@ -49,16 +49,16 @@ const DEFAULT_CONFIG = {
   mcpServers: [],
   // 定时消息任务
   scheduledTasks: [],
-  systemPrompt: `你是一个浏览器操作助手。用户会用自然语言描述他们想在当前网页上执行的操作，你需要通过调用工具来完成这些操作。
+  systemPrompt: `你是一个运行在浏览器扩展中的通用Agent。通过灵活调用工具来完成用户要求的复杂任务。
 
-操作前请先使用 get_page_info 了解当前页面状态，然后根据需要使用 get_elements 获取页面元素信息。
+如果涉及浏览器操作，请先使用 get_page_info 了解当前页面状态，然后根据需要使用 get_elements 获取页面元素信息。
 执行完操作后，简要向用户反馈操作结果。
 
-注意事项：
+浏览器调用注意事项：
 - CSS 选择器要尽量精确，避免误操作
 - 对于复杂操作，分步执行并确认每步结果
 - 如果操作失败，尝试其他选择器或方法
-- 始终使用中文与用户交流`,
+- 始终与用户用相同的语言交流`,
 };
 
 // ---- 工具定义 ----
@@ -2654,114 +2654,8 @@ async function runAgent(tabId, rawUserInput, sendUpdate) {
   }
 }
 
-// ============================================================
-// Cloudflare Turnstile CDP 自动点击
-// ============================================================
-const CDP_DEBUGGER_VERSION = "1.3";
-
-async function attachDebuggerWithRetry(tabId, maxRetries = 3, retryDelay = 500) {
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    try {
-      await new Promise((resolve, reject) => {
-        chrome.debugger.attach({ tabId }, CDP_DEBUGGER_VERSION, () => {
-          if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
-          else resolve();
-        });
-      });
-      return;
-    } catch (error) {
-      console.warn(`[CDP] Attempt ${attempt}/${maxRetries} to attach debugger failed: ${error.message}`);
-      if (attempt < maxRetries) {
-        await new Promise(r => setTimeout(r, retryDelay));
-      } else {
-        throw new Error(`Failed to attach debugger after ${maxRetries} attempts.`);
-      }
-    }
-  }
-}
-
-async function findIframeAndClickAtRatio(tabId, payload) {
-  const { xRatio, yRatio } = payload;
-  const maxRetries = 3;
-  const retryDelay = 1000;
-
-  for (let i = 0; i < maxRetries; i++) {
-    try {
-      function getAttr(attrs, name) {
-        if (!attrs) return undefined;
-        for (let j = 0; j < attrs.length; j += 2) {
-          if (attrs[j] === name) return attrs[j + 1];
-        }
-      }
-
-      const { nodes } = await chrome.debugger.sendCommand({ tabId }, "DOM.getFlattenedDocument", {
-        depth: -1,
-        pierce: true
-      });
-
-      const iframeNode = nodes.find(n => {
-        if (n.nodeName !== 'IFRAME') return false;
-        const src = getAttr(n.attributes, 'src') || '';
-        return src.includes('challenges.cloudflare.com');
-      });
-      if (!iframeNode) throw new Error('Turnstile iframe not found');
-
-      const { model: iframeBox } = await chrome.debugger.sendCommand({ tabId }, "DOM.getBoxModel", {
-        nodeId: iframeNode.nodeId
-      });
-
-      const [x_start, y_start, , , x_end, y_end] = iframeBox.content;
-      const clickX = x_start + ((x_end - x_start) * xRatio);
-      const clickY = y_start + ((y_end - y_start) * yRatio);
-
-      await cdpClickAtCoordinates(tabId, clickX, clickY);
-      return { success: true };
-    } catch (error) {
-      console.warn(`[CDP] Attempt ${i + 1} error:`, error.message || error);
-      if (i < maxRetries - 1) {
-        await new Promise(r => setTimeout(r, retryDelay));
-      }
-    }
-  }
-  return { success: false, error: 'Failed to click iframe after all retries' };
-}
-
-async function cdpClickAtCoordinates(tabId, x, y) {
-  const dispatch = (type, button) => {
-    return chrome.debugger.sendCommand({ tabId }, "Input.dispatchMouseEvent", {
-      type, x, y, button,
-      buttons: button === "left" ? 1 : 0,
-      clickCount: 1
-    });
-  };
-  await dispatch("mousePressed", "left");
-  await new Promise(r => setTimeout(r, Math.random() * 30 + 20));
-  await dispatch("mouseReleased", "left");
-}
-
 // ---- 消息监听 ----
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  // Cloudflare Turnstile 自动点击
-  if (message.action === "detectAndClickTurnstile" && message.payload) {
-    const tabId = sender.tab.id;
-    (async () => {
-      try {
-        await attachDebuggerWithRetry(tabId);
-        const send = (m, p) => chrome.debugger.sendCommand({ tabId }, m, p);
-        await send("Page.enable");
-        await send("Runtime.enable");
-        await send("DOM.enable");
-        const result = await findIframeAndClickAtRatio(tabId, message.payload);
-        sendResponse(result);
-      } catch (error) {
-        console.error('[CDP] Critical error:', error);
-        sendResponse({ success: false, error: error.message });
-      } finally {
-        chrome.debugger.detach({ tabId }, () => {});
-      }
-    })();
-    return true;
-  }
 
   if (sender?.id && sender.id !== chrome.runtime.id) {
     sendResponse({ ok: false, error: "消息来源无效" });

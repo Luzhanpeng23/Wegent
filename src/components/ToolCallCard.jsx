@@ -89,11 +89,11 @@ export default function ToolCallCard({ name, args, status, result, duration, ind
             type="button"
             className="flex w-full items-center justify-between gap-3 bg-muted/50 px-3 py-2 text-left"
           >
-            <div className="flex min-w-0 items-center gap-2">
+            <div className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden">
               <ChevronRight
                 className={`h-4 w-4 shrink-0 text-muted-foreground transition-transform ${expanded ? 'rotate-90' : ''}`}
               />
-              <span className="text-sm font-semibold">{label}</span>
+              <span className="shrink-0 text-sm font-semibold">{label}</span>
               {summary && (
                 <span className="truncate text-xs text-muted-foreground">{summary}</span>
               )}

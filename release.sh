@@ -42,9 +42,9 @@ rm -f "$ASSET_PATH"
 
 echo "[2/4] 打包发布附件..."
 if command -v zip >/dev/null 2>&1; then
-  zip -r "$ASSET_PATH" manifest.json background.js content.js icons sidepanel LICENSE README.md >/dev/null
+  zip -r "$ASSET_PATH" manifest.json background.js content.js src icons sidepanel LICENSE README.md >/dev/null
 elif command -v powershell >/dev/null 2>&1; then
-  powershell -NoProfile -Command "Compress-Archive -Path manifest.json,background.js,content.js,icons,sidepanel,LICENSE,README.md -DestinationPath '$ASSET_PATH' -Force" >/dev/null
+  powershell -NoProfile -Command "Compress-Archive -Path manifest.json,background.js,content.js,src,icons,sidepanel,LICENSE,README.md -DestinationPath '$ASSET_PATH' -Force" >/dev/null
 else
   echo "错误：未找到 zip 或 powershell，无法打包"
   exit 1

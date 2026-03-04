@@ -36,7 +36,7 @@
 
 ## 演示视频
 
-<video src="./sample.mp4" controls muted playsinline width="640"></video>
+![Wegent 演示视频预览](./image/README/demo.gif)
 
 ---
 
